@@ -1,0 +1,12 @@
+services:
+  dvm:
+    build: .
+    env_file: .env
+    volumes:
+      - dvm-data:/app/data
+      - dvm-temp:/app/temp
+    restart: unless-stopped
+
+volumes:
+  dvm-data:
+  dvm-temp:

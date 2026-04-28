@@ -1,0 +1,153 @@
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using NBitcoin.Secp256k1;
+using NNostr.Client;
+using NNostr.Client.Protocols;
+using NostrShortsDvm.Config;
+using NostrShortsDvm.Models;
+
+namespace NostrShortsDvm.Nostr;
+
+public class EventPublisher
+{
+    private readonly AppSettings _settings;
+    private readonly ILogger<EventPublisher> _logger;
+
+    public EventPublisher(AppSettings settings, ILogger<EventPublisher> logger)
+    {
+        _settings = settings;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Publishes a nostr event (kind 1 or kind 34235) pointing to the blossom video.
+    /// </summary>
+    public async Task<string?> PublishVideoEventAsync(
+        VideoJob job,
+        ECPrivKey publishKey,
+        INostrClient client,
+        CancellationToken ct)
+    {
+        var evt = _settings.Nostr.EventKind == 34235
+            ? CreateNip71Event(job)
+            : CreateKind1Event(job);
+
+        await evt.ComputeIdAndSignAsync(publishKey);
+
+        _logger.LogInformation("Publishing kind {Kind} event: {Id}", evt.Kind, evt.Id);
+
+        await client.PublishEvent(evt, ct);
+
+        job.EventId = evt.Id;
+        return evt.Id;
+    }
+
+    /// <summary>
+    /// Sends a NIP-17 DM reply back to the sender confirming the upload.
+    /// </summary>
+    public async Task SendDmReplyAsync(
+        string recipientPubKeyHex,
+        string message,
+        ECPrivKey senderPrivKey,
+        INostrClient client,
+        CancellationToken ct)
+    {
+        try
+        {
+            var recipientPubKey = NostrExtensions.ParsePubKey(recipientPubKeyHex);
+            var senderPubKey = senderPrivKey.CreateXOnlyPubKey();
+
+            // Create the rumor (kind 14)
+            var rumor = new NostrEvent
+            {
+                Kind = 14,
+                Content = message,
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+            rumor.SetTag("p", recipientPubKeyHex);
+
+            var rumorJson = JsonSerializer.Serialize(rumor);
+
+            // Create the seal (kind 13)
+            var seal = new NostrEvent
+            {
+                Kind = 13,
+                Content = NIP44.Encrypt(senderPrivKey, recipientPubKey, rumorJson),
+                CreatedAt = RandomizeTimestamp()
+            };
+            await seal.ComputeIdAndSignAsync(senderPrivKey);
+            var sealJson = JsonSerializer.Serialize(seal);
+
+            // Create the gift wrap (kind 1059) using a random ephemeral key
+            var ephemeralKey = ECPrivKey.Create(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            var giftWrap = new NostrEvent
+            {
+                Kind = 1059,
+                Content = NIP44.Encrypt(ephemeralKey, recipientPubKey, sealJson),
+                CreatedAt = RandomizeTimestamp()
+            };
+            giftWrap.SetTag("p", recipientPubKeyHex);
+            await giftWrap.ComputeIdAndSignAsync(ephemeralKey);
+
+            await client.PublishEvent(giftWrap, ct);
+
+            _logger.LogInformation("Sent DM reply to {Recipient}", recipientPubKeyHex[..8]);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send DM reply");
+        }
+    }
+
+    private NostrEvent CreateKind1Event(VideoJob job)
+    {
+        var content = $"{job.BlossomUrl}";
+        if (!string.IsNullOrEmpty(job.Title))
+            content = $"{job.Title}\n\n{content}";
+
+        var evt = new NostrEvent
+        {
+            Kind = 1,
+            Content = content,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        evt.SetTag("r", job.BlossomUrl!);
+        evt.SetTag("t", "shorts");
+
+        return evt;
+    }
+
+    private NostrEvent CreateNip71Event(VideoJob job)
+    {
+        var evt = new NostrEvent
+        {
+            Kind = 34235,
+            Content = job.Title ?? string.Empty,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        // NIP-71 tags
+        evt.Tags ??= [];
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "url", Data = [job.BlossomUrl!] });
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "m", Data = [job.MimeType ?? "video/mp4"] });
+        if (job.FileHash != null)
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "x", Data = [job.FileHash] });
+        if (job.FileSize.HasValue)
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "size", Data = [job.FileSize.Value.ToString()] });
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
+
+        // d-tag for addressable event
+        evt.SetTag("d", job.FileHash ?? Guid.NewGuid().ToString());
+
+        return evt;
+    }
+
+    private static DateTimeOffset RandomizeTimestamp()
+    {
+        // Randomize timestamp within the last 2 days for privacy (NIP-59)
+        var random = new Random();
+        var secondsOffset = random.Next(0, 172800); // 0 to 48 hours
+        return DateTimeOffset.UtcNow.AddSeconds(-secondsOffset);
+    }
+}
