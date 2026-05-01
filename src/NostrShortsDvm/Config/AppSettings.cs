@@ -34,7 +34,7 @@ public class NostrSettings
     /// <summary>
     /// Event kind to publish: 1 (note) or 34235 (NIP-71 video).
     /// </summary>
-    public int EventKind { get; set; } = 1;
+    public int EventKind { get; set; } = 34235;
 }
 
 public class BlossomSettings

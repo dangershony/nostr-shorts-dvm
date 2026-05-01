@@ -20,6 +20,84 @@ public class EventPublisher
     }
 
     /// <summary>
+    /// Checks relays for an existing published event with the given original URL in an "r" tag.
+    /// Returns the blossom URL if found, null otherwise.
+    /// </summary>
+    public async Task<string?> FindExistingVideoByUrlAsync(
+        string originalUrl,
+        ECPrivKey publishKey,
+        INostrClient client,
+        CancellationToken ct)
+    {
+        try
+        {
+            var publishPubKey = publishKey.CreateXOnlyPubKey().ToHex();
+            var eventKind = _settings.Nostr.EventKind;
+
+            var filter = new NostrSubscriptionFilter
+            {
+                Kinds = [eventKind],
+                Authors = [publishPubKey],
+                ExtensionData = new Dictionary<string, JsonElement>
+                {
+                    ["#r"] = JsonSerializer.SerializeToElement(new[] { originalUrl })
+                }
+            };
+
+            var subId = $"check-{Guid.NewGuid().ToString()[..8]}";
+            var events = new List<NostrEvent>();
+
+            void OnEventsReceived(object? sender, (string subscriptionId, NostrEvent[] events) args)
+            {
+                if (args.subscriptionId == subId)
+                    events.AddRange(args.events);
+            }
+
+            client.EventsReceived += OnEventsReceived;
+
+            try
+            {
+                await client.CreateSubscription(subId, [filter], ct);
+
+                // Give relays a moment to respond
+                await Task.Delay(2000, ct);
+
+                await client.CloseSubscription(subId, ct);
+            }
+            finally
+            {
+                client.EventsReceived -= OnEventsReceived;
+            }
+
+            if (events.Count > 0)
+            {
+                var evt = events.First();
+                // Find the blossom URL from the "url" tag (NIP-71) or first "r" tag that's not the original
+                var urlTag = evt.Tags?.FirstOrDefault(t => t.TagIdentifier == "url")?.Data?.FirstOrDefault();
+                if (urlTag != null)
+                {
+                    _logger.LogInformation("Found existing event on relay for {Url}: {BlossomUrl}", originalUrl, urlTag);
+                    return urlTag;
+                }
+
+                var rTags = evt.Tags?.Where(t => t.TagIdentifier == "r").ToList();
+                var blossomTag = rTags?.FirstOrDefault(t => t.Data?.FirstOrDefault() != originalUrl)?.Data?.FirstOrDefault();
+                if (blossomTag != null)
+                {
+                    _logger.LogInformation("Found existing event on relay for {Url}: {BlossomUrl}", originalUrl, blossomTag);
+                    return blossomTag;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to check relays for existing video");
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Publishes a nostr event (kind 1 or kind 34235) pointing to the blossom video.
     /// </summary>
     public async Task<string?> PublishVideoEventAsync(
@@ -112,8 +190,10 @@ public class EventPublisher
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        evt.SetTag("r", job.BlossomUrl!);
-        evt.SetTag("t", "shorts");
+        evt.Tags ??= [];
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.BlossomUrl!] });
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.OriginalUrl!] });
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
 
         return evt;
     }
@@ -136,6 +216,7 @@ public class EventPublisher
         if (job.FileSize.HasValue)
             evt.Tags.Add(new NostrEventTag { TagIdentifier = "size", Data = [job.FileSize.Value.ToString()] });
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.OriginalUrl!] });
 
         // d-tag for addressable event
         evt.SetTag("d", job.FileHash ?? Guid.NewGuid().ToString());

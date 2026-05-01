@@ -53,6 +53,17 @@ public class MessageProcessor
 
     public async Task ProcessGiftWrapAsync(NostrEvent giftWrap, INostrClient client, CancellationToken ct)
     {
+        // Skip events already processed in a previous run
+        if (giftWrap.Id != null && _duplicateTracker.IsEventProcessed(giftWrap.Id))
+        {
+            _logger.LogDebug("Skipping already-processed event {Id}", giftWrap.Id);
+            return;
+        }
+
+        // Mark event as processed immediately to prevent reprocessing on restart
+        if (giftWrap.Id != null)
+            _duplicateTracker.MarkEventProcessed(giftWrap.Id);
+
         // Step 1: Decrypt the gift wrap
         var rumor = _decryptor.Decrypt(giftWrap, _dvmPrivKey);
         if (rumor == null)
@@ -75,6 +86,15 @@ public class MessageProcessor
             return;
         }
 
+        // Skip messages older than 5 minutes to avoid reprocessing old DMs on restart
+        var messageAge = DateTimeOffset.UtcNow - (rumor.CreatedAt ?? DateTimeOffset.MinValue);
+        if (messageAge > TimeSpan.FromMinutes(5))
+        {
+            _logger.LogDebug("Skipping old message ({Age:F0}s old): {Content}",
+                messageAge.TotalSeconds, rumor.Content?.Substring(0, Math.Min(50, rumor.Content?.Length ?? 0)));
+            return;
+        }
+
         _logger.LogInformation("Received DM from authorized user: {Content}",
             rumor.Content?.Substring(0, Math.Min(100, rumor.Content?.Length ?? 0)));
 
@@ -91,13 +111,25 @@ public class MessageProcessor
 
         _logger.LogInformation("Found {Platform} URL: {Url}", job.Platform, job.OriginalUrl);
 
-        // Step 4: Check for duplicates
+        // Step 4: Check for duplicates (DB first, then relay fallback)
         var existingUrl = _duplicateTracker.GetExistingBlossomUrl(job.OriginalUrl);
+        if (existingUrl == null)
+        {
+            // Fallback: check relays for an existing event with this URL tag
+            existingUrl = await _publisher.FindExistingVideoByUrlAsync(
+                job.OriginalUrl, _publishPrivKey, client, ct);
+            if (existingUrl != null)
+            {
+                // Re-populate the DB so we don't query relays again next time
+                _duplicateTracker.MarkProcessed(job.OriginalUrl, existingUrl, null);
+            }
+        }
+
         if (existingUrl != null)
         {
             _logger.LogInformation("Duplicate URL, already processed: {BlossomUrl}", existingUrl);
             await _publisher.SendDmReplyAsync(senderPubKey,
-                $"Already processed! {existingUrl}",
+                $"This video was already uploaded!\n\n{job.OriginalUrl}\n→ {existingUrl}",
                 _dvmPrivKey, client, ct);
             return;
         }
@@ -106,7 +138,7 @@ public class MessageProcessor
         if (!await _downloader.DownloadAsync(job, ct))
         {
             await _publisher.SendDmReplyAsync(senderPubKey,
-                $"Failed to download video from {job.OriginalUrl}",
+                $"Failed to download video from:\n{job.OriginalUrl}",
                 _dvmPrivKey, client, ct);
             return;
         }
@@ -117,7 +149,7 @@ public class MessageProcessor
             if (!await _uploader.UploadAsync(job, _publishPrivKey, ct))
             {
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Failed to upload video to Blossom server",
+                    $"Failed to upload video to Blossom server:\n{job.OriginalUrl}",
                     _dvmPrivKey, client, ct);
                 return;
             }
@@ -129,7 +161,7 @@ public class MessageProcessor
             _duplicateTracker.MarkProcessed(job.OriginalUrl, job.BlossomUrl!, eventId);
 
             // Step 9: Reply with confirmation
-            var replyMessage = $"Video uploaded and published!\n\nBlossom: {job.BlossomUrl}";
+            var replyMessage = $"Video uploaded and published!\n\nSource: {job.OriginalUrl}\nBlossom: {job.BlossomUrl}";
             if (eventId != null)
                 replyMessage += $"\nEvent: {eventId}";
 

@@ -32,7 +32,11 @@ public class DuplicateTracker : IDisposable
                 blossom_url TEXT NOT NULL,
                 event_id TEXT,
                 processed_at TEXT NOT NULL
-            )
+            );
+            CREATE TABLE IF NOT EXISTS processed_events (
+                event_id TEXT PRIMARY KEY NOT NULL,
+                processed_at TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
         _logger.LogInformation("Database initialized");
@@ -73,5 +77,31 @@ public class DuplicateTracker : IDisposable
     public void Dispose()
     {
         _connection.Dispose();
+    }
+
+    /// <summary>
+    /// Returns true if this gift wrap event was already processed.
+    /// </summary>
+    public bool IsEventProcessed(string eventId)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM processed_events WHERE event_id = @eventId";
+        cmd.Parameters.AddWithValue("@eventId", eventId);
+        return cmd.ExecuteScalar() != null;
+    }
+
+    /// <summary>
+    /// Marks a gift wrap event as processed (regardless of outcome).
+    /// </summary>
+    public void MarkEventProcessed(string eventId)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO processed_events (event_id, processed_at)
+            VALUES (@eventId, @processedAt)
+            """;
+        cmd.Parameters.AddWithValue("@eventId", eventId);
+        cmd.Parameters.AddWithValue("@processedAt", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
     }
 }

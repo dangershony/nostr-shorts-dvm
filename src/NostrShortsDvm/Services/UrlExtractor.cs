@@ -15,6 +15,8 @@ public class UrlExtractor
         ("instagram", new Regex(@"https?://(?:www\.)?instagram\.com/reel/[\w\-]+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("instagram", new Regex(@"https?://(?:www\.)?instagram\.com/p/[\w\-]+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("facebook", new Regex(@"https?://(?:www\.)?facebook\.com/reel/\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
+        ("facebook", new Regex(@"https?://(?:www\.)?facebook\.com/share/r/[\w]+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
+        ("facebook", new Regex(@"https?://(?:www\.)?facebook\.com/share/v/[\w]+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("facebook", new Regex(@"https?://(?:www\.)?facebook\.com/.+/videos/\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("twitter", new Regex(@"https?://(?:www\.)?(?:twitter\.com|x\.com)/\w+/status/\d+", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
     ];
