@@ -53,7 +53,7 @@ services.AddSingleton<BlossomUploader>();
 services.AddSingleton<EventPublisher>();
 services.AddSingleton<NostrRelayClient>();
 services.AddSingleton<MessageProcessor>();
-services.AddSingleton<HttpClient>();
+services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromMinutes(10) });
 
 var sp = services.BuildServiceProvider();
 var logger = sp.GetRequiredService<ILogger<Program>>();
@@ -67,7 +67,7 @@ ECPrivKey publishPrivKey = string.IsNullOrEmpty(settings.Nostr.PublishPrivateKey
 // Resolve the "listen from" pubkey hex
 string listenFromPubKeyHex = ParsePubKeyHex(settings.Nostr.ListenFromNpub);
 
-logger.LogInformation("DVM pubkey: {PubKey}", dvmPrivKey.CreateXOnlyPubKey().ToHex()[..16] + "...");
+logger.LogInformation("DVM pubkey (full): {PubKey}", dvmPrivKey.CreateXOnlyPubKey().ToHex());
 logger.LogInformation("Publish pubkey: {PubKey}", publishPrivKey.CreateXOnlyPubKey().ToHex()[..16] + "...");
 logger.LogInformation("Listening for DMs from: {PubKey}", listenFromPubKeyHex[..16] + "...");
 logger.LogInformation("Blossom server: {Url}", settings.Blossom.ServerUrl);

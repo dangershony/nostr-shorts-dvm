@@ -25,7 +25,7 @@ public class VideoDownloader
 
         var outputTemplate = Path.Combine(_settings.YtDlp.TempDir, "%(id)s.%(ext)s");
 
-        var args = $"--no-playlist --no-warnings -o \"{outputTemplate}\" --print after_move:filepath \"{job.OriginalUrl}\"";
+        var args = $"--no-playlist --no-warnings --max-filesize 100M -o \"{outputTemplate}\" --print after_move:filepath \"{job.OriginalUrl}\"";
 
         _logger.LogInformation("Downloading video: {Url}", job.OriginalUrl);
 

@@ -29,7 +29,7 @@ public class NostrSettings
     /// <summary>
     /// Relay WebSocket URLs.
     /// </summary>
-    public string[] Relays { get; set; } = ["wss://relay.damus.io", "wss://nos.lol"];
+    public string[] Relays { get; set; } = [];
 
     /// <summary>
     /// Event kind to publish: 1 (note) or 34235 (NIP-71 video).

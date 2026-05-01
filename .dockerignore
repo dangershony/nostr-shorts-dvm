@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.env
+.git/
+.vs/
+.idea/
+*.md
+temp/
+data/

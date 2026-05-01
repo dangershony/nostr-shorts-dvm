@@ -34,14 +34,18 @@ public class BlossomUploader
             return false;
         }
 
-        // Compute SHA-256 hash of the file
-        var fileBytes = await File.ReadAllBytesAsync(job.LocalFilePath, ct);
-        var hashBytes = System.Security.Cryptography.SHA256.HashData(fileBytes);
+        // Compute SHA-256 hash of the file using streaming (avoid loading entire file into memory)
+        byte[] hashBytes;
+        await using (var hashStream = File.OpenRead(job.LocalFilePath))
+        {
+            hashBytes = await System.Security.Cryptography.SHA256.HashDataAsync(hashStream, ct);
+        }
         job.FileHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
 
         var uploadUrl = $"{_settings.Blossom.ServerUrl.TrimEnd('/')}/upload";
 
-        _logger.LogInformation("Uploading to Blossom: {Url} (hash: {Hash})", uploadUrl, job.FileHash);
+        _logger.LogInformation("Uploading to Blossom: {Url} (hash: {Hash}, size: {Size} bytes)",
+            uploadUrl, job.FileHash, job.FileSize);
 
         // Create BUD-02 authorization event (kind 24242)
         var authEvent = new NostrEvent
@@ -59,7 +63,9 @@ public class BlossomUploader
         var authJson = JsonSerializer.Serialize(authEvent);
         var authBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(authJson));
 
-        using var content = new ByteArrayContent(fileBytes);
+        // Stream the file instead of loading into memory
+        using var fileStream = File.OpenRead(job.LocalFilePath);
+        using var content = new StreamContent(fileStream);
         content.Headers.ContentType = new MediaTypeHeaderValue(job.MimeType ?? "application/octet-stream");
 
         using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
@@ -68,7 +74,7 @@ public class BlossomUploader
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Nostr", authBase64);
 
-        var response = await _httpClient.SendAsync(request, ct);
+        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
 
         if (!response.IsSuccessStatusCode)
         {

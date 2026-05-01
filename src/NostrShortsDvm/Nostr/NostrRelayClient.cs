@@ -13,6 +13,7 @@ public class NostrRelayClient : IAsyncDisposable
     private readonly AppSettings _settings;
     private readonly ILogger<NostrRelayClient> _logger;
     private CompositeNostrClient? _client;
+    private readonly HashSet<string> _processedEventIds = new();
 
     public event EventHandler<NostrEvent>? GiftWrapReceived;
 
@@ -40,21 +41,40 @@ public class NostrRelayClient : IAsyncDisposable
 
         _client.EventsReceived += (sender, args) =>
         {
+            _logger.LogInformation("Received {Count} events from subscription {Sub}",
+                args.events.Length, args.subscriptionId);
+
             foreach (var evt in args.events)
             {
                 if (evt.Kind == 1059)
                 {
-                    _logger.LogDebug("Received gift wrap event: {Id}", evt.Id);
+                    // Deduplicate: CompositeNostrClient delivers the same event from each relay
+                    lock (_processedEventIds)
+                    {
+                        if (!_processedEventIds.Add(evt.Id!))
+                        {
+                            _logger.LogDebug("Skipping duplicate gift wrap event: {Id}", evt.Id);
+                            continue;
+                        }
+                    }
+
+                    _logger.LogInformation("Received gift wrap event: {Id} (created {CreatedAt})",
+                        evt.Id, evt.CreatedAt);
                     GiftWrapReceived?.Invoke(this, evt);
+                }
+                else
+                {
+                    _logger.LogDebug("Ignoring non-gift-wrap event kind {Kind}: {Id}", evt.Kind, evt.Id);
                 }
             }
         };
 
+        // No Since filter — process all gift wraps including those sent while offline.
+        // The DuplicateTracker prevents reprocessing of already-handled URLs.
         var filter = new NostrSubscriptionFilter
         {
             Kinds = [1059],
             ReferencedPublicKeys = [ourPubKey],
-            Since = DateTimeOffset.UtcNow
         };
 
         await _client.CreateSubscription("nip17-dms", [filter], ct);
