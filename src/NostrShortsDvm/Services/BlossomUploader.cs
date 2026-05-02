@@ -91,6 +91,14 @@ public class BlossomUploader
                     var body = await response.Content.ReadAsStringAsync(ct);
                     _logger.LogError("Blossom upload failed ({Status}): {Body}", response.StatusCode, body);
                     lastError = $"Blossom upload failed ({response.StatusCode}): {body}";
+
+                    // Don't retry on permanent errors
+                    if ((int)response.StatusCode == 413 || (int)response.StatusCode == 401 || (int)response.StatusCode == 403)
+                    {
+                        var sizeMb = job.FileSize.HasValue ? $" ({job.FileSize.Value / 1024.0 / 1024.0:F1} MB)" : "";
+                        return $"Blossom server rejected upload{sizeMb}: {response.StatusCode} — {body.Trim()}";
+                    }
+
                     continue;
                 }
 
