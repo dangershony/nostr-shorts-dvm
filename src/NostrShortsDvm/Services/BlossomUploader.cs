@@ -15,10 +15,14 @@ public class BlossomUploader
     private readonly HttpClient _httpClient;
     private readonly ILogger<BlossomUploader> _logger;
 
+    private const int MaxRetries = 2;
+    private static readonly TimeSpan UploadTimeout = TimeSpan.FromMinutes(5);
+
     public BlossomUploader(AppSettings settings, HttpClient httpClient, ILogger<BlossomUploader> logger)
     {
         _settings = settings;
         _httpClient = httpClient;
+        _httpClient.Timeout = UploadTimeout;
         _logger = logger;
     }
 
@@ -63,42 +67,58 @@ public class BlossomUploader
         var authJson = JsonSerializer.Serialize(authEvent);
         var authBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(authJson));
 
-        // Stream the file instead of loading into memory
-        using var fileStream = File.OpenRead(job.LocalFilePath);
-        using var content = new StreamContent(fileStream);
-        content.Headers.ContentType = new MediaTypeHeaderValue(job.MimeType ?? "application/octet-stream");
-
-        using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+        string? lastError = null;
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
         {
-            Content = content
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Nostr", authBase64);
+            try
+            {
+                // Stream the file instead of loading into memory
+                using var fileStream = File.OpenRead(job.LocalFilePath);
+                using var content = new StreamContent(fileStream);
+                content.Headers.ContentType = new MediaTypeHeaderValue(job.MimeType ?? "application/octet-stream");
 
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+                using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+                {
+                    Content = content
+                };
+                request.Headers.Authorization = new AuthenticationHeaderValue("Nostr", authBase64);
 
-        if (!response.IsSuccessStatusCode)
-        {
-            var body = await response.Content.ReadAsStringAsync(ct);
-            _logger.LogError("Blossom upload failed ({Status}): {Body}", response.StatusCode, body);
-            return $"Blossom upload failed ({response.StatusCode}): {body}";
+                var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(ct);
+                    _logger.LogError("Blossom upload failed ({Status}): {Body}", response.StatusCode, body);
+                    lastError = $"Blossom upload failed ({response.StatusCode}): {body}";
+                    continue;
+                }
+
+                var responseBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogDebug("Blossom response: {Body}", responseBody);
+
+                // Parse response to get the URL
+                using var doc = JsonDocument.Parse(responseBody);
+                if (doc.RootElement.TryGetProperty("url", out var urlProp))
+                {
+                    job.BlossomUrl = urlProp.GetString();
+                }
+                else
+                {
+                    // Fallback: construct URL from hash
+                    job.BlossomUrl = $"{_settings.Blossom.ServerUrl.TrimEnd('/')}/{job.FileHash}";
+                }
+
+                _logger.LogInformation("Uploaded to Blossom: {BlossomUrl}", job.BlossomUrl);
+                return null;
+            }
+            catch (HttpRequestException ex) when (attempt < MaxRetries)
+            {
+                _logger.LogWarning(ex, "Blossom upload attempt {Attempt}/{Max} failed, retrying...", attempt, MaxRetries);
+                lastError = $"Upload error: {ex.Message}";
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            }
         }
 
-        var responseBody = await response.Content.ReadAsStringAsync(ct);
-        _logger.LogDebug("Blossom response: {Body}", responseBody);
-
-        // Parse response to get the URL
-        using var doc = JsonDocument.Parse(responseBody);
-        if (doc.RootElement.TryGetProperty("url", out var urlProp))
-        {
-            job.BlossomUrl = urlProp.GetString();
-        }
-        else
-        {
-            // Fallback: construct URL from hash
-            job.BlossomUrl = $"{_settings.Blossom.ServerUrl.TrimEnd('/')}/{job.FileHash}";
-        }
-
-        _logger.LogInformation("Uploaded to Blossom: {BlossomUrl}", job.BlossomUrl);
-        return null;
+        return lastError ?? "Blossom upload failed after retries";
     }
 }
