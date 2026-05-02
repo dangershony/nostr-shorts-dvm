@@ -18,8 +18,9 @@ public class VideoDownloader
 
     /// <summary>
     /// Downloads the video using yt-dlp and populates the job with file path, mime type, etc.
+    /// Returns null on success, or an error message on failure.
     /// </summary>
-    public async Task<bool> DownloadAsync(VideoJob job, CancellationToken ct)
+    public async Task<string?> DownloadAsync(VideoJob job, CancellationToken ct)
     {
         Directory.CreateDirectory(_settings.YtDlp.TempDir);
 
@@ -43,7 +44,7 @@ public class VideoDownloader
         if (process == null)
         {
             _logger.LogError("Failed to start yt-dlp");
-            return false;
+            return "Failed to start yt-dlp process";
         }
 
         var stdout = await process.StandardOutput.ReadToEndAsync(ct);
@@ -54,7 +55,7 @@ public class VideoDownloader
         if (process.ExitCode != 0)
         {
             _logger.LogError("yt-dlp failed with exit code {ExitCode}: {Stderr}", process.ExitCode, stderr);
-            return false;
+            return $"yt-dlp failed (exit code {process.ExitCode}): {stderr.Trim()}";
         }
 
         var filePath = stdout.Trim().Split('\n').Last().Trim();
@@ -62,7 +63,7 @@ public class VideoDownloader
         if (!File.Exists(filePath))
         {
             _logger.LogError("yt-dlp output file not found: {FilePath}", filePath);
-            return false;
+            return $"Downloaded file not found at: {filePath}";
         }
 
         job.LocalFilePath = filePath;
@@ -70,7 +71,7 @@ public class VideoDownloader
         job.FileSize = new FileInfo(filePath).Length;
 
         _logger.LogInformation("Downloaded: {FilePath} ({Size} bytes)", filePath, job.FileSize);
-        return true;
+        return null;
     }
 
     /// <summary>

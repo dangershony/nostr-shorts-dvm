@@ -16,15 +16,22 @@ public class NostrSettings
     public string PrivateKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// Optional separate private key for publishing events.
-    /// If empty, the DVM's PrivateKey is used.
+    /// Optional separate private key for publishing events (legacy single-account mode).
+    /// If empty, the DVM's PrivateKey is used. Prefer using Accounts[] instead.
     /// </summary>
     public string PublishPrivateKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// The npub (or hex pubkey) to listen for DMs from.
+    /// The npub (or hex pubkey) to listen for DMs from (legacy single-account mode).
+    /// Prefer using Accounts[] instead.
     /// </summary>
     public string ListenFromNpub { get; set; } = string.Empty;
+
+    /// <summary>
+    /// List of account pairs. Each maps a listener (who sends DMs) to a publish key (who posts videos).
+    /// If empty, falls back to PublishPrivateKey + ListenFromNpub.
+    /// </summary>
+    public AccountPair[] Accounts { get; set; } = [];
 
     /// <summary>
     /// Relay WebSocket URLs.
@@ -35,6 +42,16 @@ public class NostrSettings
     /// Event kind to publish: 1 (note) or 34235 (NIP-71 video).
     /// </summary>
     public int EventKind { get; set; } = 34235;
+
+    /// <summary>
+    /// Default zap share percentage for the creator when a creator pubkey is provided (0-100).
+    /// </summary>
+    public int DefaultCreatorZapShare { get; set; } = 50;
+
+    /// <summary>
+    /// Lightning address (lud16) to set on publish account profiles for receiving zaps.
+    /// </summary>
+    public string LightningAddress { get; set; } = string.Empty;
 }
 
 public class BlossomSettings
@@ -51,4 +68,20 @@ public class YtDlpSettings
 public class DatabaseSettings
 {
     public string Path { get; set; } = "/app/data/processed.db";
+}
+
+/// <summary>
+/// Maps an authorized sender (ListenFromNpub) to a publishing identity (PublishPrivateKey).
+/// </summary>
+public class AccountPair
+{
+    /// <summary>
+    /// Private key (nsec or hex) used to publish video events for this account.
+    /// </summary>
+    public string PublishPrivateKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The npub (or hex pubkey) authorized to send DMs that trigger publishing with this account's key.
+    /// </summary>
+    public string ListenFromNpub { get; set; } = string.Empty;
 }

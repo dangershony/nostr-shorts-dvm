@@ -6,58 +6,91 @@ Credit the original video creators on reposted content and enable zap splitting 
 
 ---
 
+## Current State
+
+- **NIP-71 (kind 34235)** is already the default event kind for published videos
+- **Original URL** is already tagged on published events via `["r", "<original-url>"]`
+- **Multi-account support** implemented — multiple publish keys with per-sender routing
+- **Profile auto-update** — publish accounts' profiles are updated on startup with DVM npub and bot version
+- **Lightning address for zaps**: `vidu@coinos.pro`
+
+> **NOTE**: Investigate whether there is a Lightning/LNURL service that can programmatically create lightning addresses per account (for multi-account zap routing). Check LNbits, Alby, or similar services.
+
+---
+
+## Decisions Made
+
+1. **Event kind**: Kind 34235 (NIP-71 video) is the default — already implemented
+2. **Zap split ratio**: Default 50/50 when creator pubkey is provided
+3. **DM command format**: `<url>` or `<url> <npub>` or `<url> <npub> <split>` — simple space-separated
+4. **Escrow approach**: Start with Option A (custodial tracking), migrate to Cashu/Nutzaps later
+5. **Lightning address**: `vidu@coinos.pro` for receiving zaps on published events
+
+---
+
 ## Phase 1: Attribution Tags
 
 Add metadata to published events that credits the original source.
 
-### Kind 34235 (NIP-71 Video Events)
-- `["origin", "<platform>", "<video-id>", "<original-url>"]` — tracks where the video came from
-- `["p", "<creator-pubkey>", "<relay>"]` — if creator's Nostr pubkey is known
-- `["r", "<original-url>"]` — link back to original
+### Tags Added to All Events
 
-### Kind 1 (Notes)
-- Include original URL in content (already done)
-- Add `["r", "<original-url>"]` tag
-- Add `["p", "<creator-pubkey>"]` if known
+- `["origin", "<platform>", "<video-id>", "<original-url>"]` — tracks where the video came from
+- `["r", "<original-url>"]` — link back to original (already implemented)
+- `["p", "<creator-pubkey>", "<relay>"]` — if creator's Nostr pubkey is provided in the DM
+
+### Video ID Extraction
+
+Extract video IDs from URLs for the `origin` tag:
+- **YouTube**: video ID from `/shorts/<id>`, `/watch?v=<id>`, `youtu.be/<id>`
+- **TikTok**: video ID from `/video/<id>`
+- **Instagram**: shortcode from `/reel/<code>` or `/p/<code>`
+- **Facebook**: reel ID from `/reel/<id>`
+- **X/Twitter**: status ID from `/status/<id>`
 
 ### Implementation
-- Extract platform + video ID from URL (UrlExtractor already parses this)
-- Add origin/r tags automatically on every published event
-- Add p tag only when creator pubkey is provided
+- Extend `UrlExtractor` to also return platform + video ID
+- Add `origin` tag in `EventPublisher.CreateNip71Event()` and `CreateKind1Event()`
+- Add `p` tag when creator pubkey is present on the `VideoJob`
 
 ---
 
 ## Phase 2: Zap Splits (NIP-57)
 
-NIP-57 natively supports zap splitting via `zap` tags on any event:
+NIP-57 supports zap splitting via `zap` tags on any event:
 
 ```json
-["zap", "<your-pubkey>", "wss://relay.damus.io", "<weight>"]
+["zap", "<publish-pubkey>", "wss://relay.damus.io", "<weight>"]
 ["zap", "<creator-pubkey>", "wss://relay.damus.io", "<weight>"]
 ```
 
 Clients (Amethyst, Damus, Primal, Snort) will split zaps proportionally by weight.
 
 ### When creator pubkey IS provided
-- Add two `zap` tags with configurable split ratio (e.g., 50/50 or 30/70)
-- Zaps are automatically split by compliant clients
+- Add two `zap` tags: one for the publish account, one for the creator
+- Default split: 50/50 (configurable via `Nostr__DefaultCreatorZapShare`)
+- Custom split can be specified in the DM
 
 ### When creator pubkey is NOT provided
-- Add only your pubkey in the `zap` tag (100% to you)
-- Track the video in SQLite for potential future payout
+- Add single `zap` tag with 100% to publish account
 - The `origin` tag still credits the source for attribution
+- Track in SQLite for potential future payout if creator claims
 
 ### DM Format
 ```
-<video-url>                          → no creator credit, 100% zaps to you
-<video-url> <npub>                   → split zaps with creator
-<video-url> <npub> <split>           → custom split (e.g., "70" = 70% to creator)
+<video-url>                          -> no creator credit, 100% zaps to publisher
+<video-url> <npub>                   -> split zaps 50/50 with creator
+<video-url> <npub> <split>           -> custom split (e.g., "70" = 70% to creator)
 ```
 
+### Lightning Address on Profile
+- Set `lud16` field on publish account's kind 0 profile to `vidu@coinos.pro`
+- This allows clients to resolve where to send zaps
+- Updated automatically on startup alongside the DVM npub in the about field
+
 ### Configuration
-Add to `AppSettings`:
 ```
 Nostr__DefaultCreatorZapShare=50     # default % to creator when pubkey provided
+Nostr__LightningAddress=vidu@coinos.pro  # lightning address for zap receiving
 ```
 
 ---
@@ -66,11 +99,11 @@ Nostr__DefaultCreatorZapShare=50     # default % to creator when pubkey provided
 
 ### SQLite Schema Extension
 ```sql
-CREATE TABLE creator_earnings (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS creator_earnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     original_url TEXT NOT NULL,
     platform TEXT NOT NULL,
-    platform_user_id TEXT,          -- e.g., YouTube channel ID
+    platform_user_id TEXT,          -- e.g., YouTube channel ID, TikTok username
     creator_npub TEXT,              -- NULL if unclaimed
     event_id TEXT,
     blossom_url TEXT,
@@ -83,8 +116,10 @@ CREATE TABLE creator_earnings (
 
 ### Platform User ID Extraction
 - YouTube: extract channel ID/handle from video metadata (yt-dlp `--print channel_id`)
-- TikTok: extract username from URL
+- TikTok: extract username from URL (`@username`)
 - Instagram: extract username from URL
+- Facebook: extract page/user from URL
+- X/Twitter: extract username from URL
 - This enables future matching: "this YouTube channel = this npub"
 
 ---
@@ -93,52 +128,80 @@ CREATE TABLE creator_earnings (
 
 For creators who don't have a Nostr account yet.
 
-### Option A: Custodial Tracking (Simpler)
-- All zaps go to your account
+### Option A: Custodial Tracking (Starting Here)
+- All zaps go to the publish account's lightning address
 - Track earnings per creator in SQLite
 - When creator claims (proves channel ownership), pay out via Lightning
 - Claim process: creator sends DM with proof (e.g., posts a nostr pubkey on their YouTube about page)
 - You manually verify and send Lightning payment
 
-### Option B: Nutzaps / Cashu Escrow (Trustless)
-- Use NIP-61 (Nutzaps) — ecash tokens locked to a keypair
-- Generate a keypair per unclaimed creator, store privkey encrypted
-- When creator claims, release the private key so they can sweep tokens
-- More complex, less ecosystem support currently
-- Could be automated: creator proves ownership → DVM releases key
+### Option B: Cashu/Nutzaps with P2PK (Future — Trustless)
+- Use NIP-61 (Nutzaps) — ecash tokens locked to a pubkey
+- For each external creator, generate a dedicated keypair
+- Accept nutzaps locked to that creator's generated pubkey
+- Store the private key in SQLite, associated with the platform identity
+- **Locktime + refund**: Add a `refund` pubkey (DVM's key) with a locktime (e.g., 6 months) so unclaimed tokens return to the DVM automatically
+- **On claim**: Swap accumulated tokens to new tokens locked to the creator's real Nostr pubkey
 
-### Option C: Hybrid
-- Start with Option A (custodial tracking)
-- Log all zap receipts (kind 9735) directed at your events
-- Build a simple dashboard or DM command to check earnings
-- Migrate to Option B when Nutzaps mature
-
----
-
-## Open Questions
-
-1. **Zap split ratio** — What default split? 50/50? 70% to creator?
-2. **Event kind** — Switch to kind 34235 (NIP-71) by default? It supports `origin` tag natively and is semantically correct for video content.
-3. **DM command format** — Is `<url> <npub>` sufficient, or do we want named commands like `/post <url> --creator <npub> --split 70`?
-4. **Claim process** — How should a creator prove they own a YouTube/TikTok channel? Manual verification by you, or some automated proof?
-5. **Escrow approach** — Start with Option A (custodial) or jump to Option B (Nutzaps)?
+### Creator Claim Process (same for both options)
+1. Creator sends DM to the DVM: `/claim <platform-url>`
+2. DVM generates a unique verification code (e.g., `nostr-claim:abc123`)
+3. Creator posts the code in their YouTube description / TikTok bio / channel about page
+4. DVM checks for the code using yt-dlp metadata or scraping
+5. Once verified, DVM pays out (Lightning) or releases tokens (Cashu)
 
 ---
 
-## Suggested Implementation Order
+## Implementation Order
 
-1. **Phase 1** — Add `origin` and `r` tags to all published events (~1 hour)
-2. **Phase 2** — Parse optional npub from DM, add `zap` tags with split (~2 hours)
-3. **Phase 3** — Extract platform user IDs via yt-dlp metadata, extend SQLite schema (~2 hours)
-4. **Phase 4** — Design and build claim mechanism (scope TBD based on decisions above)
+1. **Phase 1** — Add `origin` tag with video ID extraction, `p` tag for creator attribution -- **DONE**
+2. **Phase 2** — Parse optional npub + split from DM, add `zap` tags, set `lud16` on profile -- **DONE**
+3. **Phase 3** — Extract platform user IDs, extend SQLite schema for creator earnings -- **DONE**
+4. **Phase 4** — Design and build claim mechanism (scope TBD)
 
 ---
 
 ## Relevant NIPs
 
-| NIP | Purpose |
-|-----|---------|
-| NIP-57 | Lightning Zaps + `zap` tag for splits |
-| NIP-71 | Video events (kind 34235) with `origin` tag |
-| NIP-61 | Nutzaps (Cashu ecash on Nostr) — future escrow |
-| NIP-17 | Private DMs (already implemented) |
+| NIP | Purpose | Status |
+|-----|---------|--------|
+| NIP-57 | Lightning Zaps + `zap` tag for splits | Implemented (v0.0.2) |
+| NIP-71 | Video events (kind 34235) | Implemented (v0.0.1) |
+| NIP-61 | Nutzaps (Cashu ecash on Nostr) — future escrow | Future |
+| NIP-17 | Private DMs | Implemented (v0.0.1) |
+
+---
+
+## Version History
+
+- **v0.0.1** — Initial DVM: NIP-17 DM listener, video download, Blossom upload, NIP-71 publishing, multi-account support, profile auto-update
+- **v0.0.2** — Attribution tags, zap splits, creator tracking, kind 1 quote-repost for NIP-71 compatibility, detailed error messages in DM replies, startup notification DMs, lightning address on profile
+- **v0.0.3** — Kind 1 quote-repost now includes Blossom video URL + description in content for universal inline playback
+
+### What's Implemented (v0.0.2)
+
+#### Phase 1: Attribution Tags
+- [x] Video ID extraction from URLs for all 5 platforms (YouTube, TikTok, Instagram, Facebook, X/Twitter)
+- [x] `origin` tag on all published events: `["origin", "<platform>", "<video-id>", "<url>"]`
+- [x] `r` tag with original URL (was already in v0.0.1)
+- [x] `p` tag for creator attribution when npub provided in DM
+- [x] Platform user ID extraction from TikTok (`@user`), X/Twitter, Facebook URLs
+
+#### Phase 2: Zap Splits (NIP-57)
+- [x] DM format parsing: `<url>`, `<url> <npub>`, `<url> <npub> <split%>`
+- [x] `zap` tags on all published events with configurable split ratio
+- [x] Default 50/50 split (configurable via `Nostr__DefaultCreatorZapShare`)
+- [x] `lud16` lightning address set on publish account profiles (`vidu@coinos.pro`)
+- [x] Confirmation DM includes zap split info
+
+#### Phase 3: Creator Tracking
+- [x] `creator_earnings` SQLite table created on startup
+- [x] Every published video tracked with platform, user ID, creator npub, zap share %
+- [ ] Platform user ID extraction from yt-dlp metadata (YouTube channel ID) — URL-based only for now
+- [ ] Zap receipt monitoring (kind 9735 subscription)
+- [ ] Creator claim process
+
+#### Additional Features (v0.0.2)
+- [x] Kind 1 quote-repost of NIP-71 video events for client compatibility
+- [x] Detailed error reasons in failure DM replies (download errors, upload errors)
+- [x] Startup/restart notification DM sent to all listening keys with version info

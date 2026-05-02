@@ -25,9 +25,9 @@ if (string.IsNullOrEmpty(settings.Nostr.PrivateKey))
     return 1;
 }
 
-if (string.IsNullOrEmpty(settings.Nostr.ListenFromNpub))
+if (settings.Nostr.Accounts.Length == 0 && string.IsNullOrEmpty(settings.Nostr.ListenFromNpub))
 {
-    Console.Error.WriteLine("ERROR: Nostr__ListenFromNpub is required");
+    Console.Error.WriteLine("ERROR: At least one account (Nostr__Accounts__0) or Nostr__ListenFromNpub is required");
     return 1;
 }
 
@@ -53,6 +53,7 @@ services.AddSingleton<BlossomUploader>();
 services.AddSingleton<EventPublisher>();
 services.AddSingleton<NostrRelayClient>();
 services.AddSingleton<MessageProcessor>();
+services.AddSingleton<ProfileUpdater>();
 services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromMinutes(10) });
 
 var sp = services.BuildServiceProvider();
@@ -60,23 +61,49 @@ var logger = sp.GetRequiredService<ILogger<Program>>();
 
 // Parse keys
 ECPrivKey dvmPrivKey = ParsePrivateKey(settings.Nostr.PrivateKey);
-ECPrivKey publishPrivKey = string.IsNullOrEmpty(settings.Nostr.PublishPrivateKey)
-    ? dvmPrivKey
-    : ParsePrivateKey(settings.Nostr.PublishPrivateKey);
 
-// Resolve the "listen from" pubkey hex
-string listenFromPubKeyHex = ParsePubKeyHex(settings.Nostr.ListenFromNpub);
+// Build account map: listenPubKeyHex -> publishPrivKey
+var accountMap = new Dictionary<string, ECPrivKey>(StringComparer.OrdinalIgnoreCase);
 
-logger.LogInformation("DVM pubkey (full): {PubKey}", dvmPrivKey.CreateXOnlyPubKey().ToHex());
-logger.LogInformation("Publish pubkey: {PubKey}", publishPrivKey.CreateXOnlyPubKey().ToHex()[..16] + "...");
-logger.LogInformation("Listening for DMs from: {PubKey}", listenFromPubKeyHex[..16] + "...");
+if (settings.Nostr.Accounts.Length > 0)
+{
+    // New multi-account config
+    foreach (var account in settings.Nostr.Accounts)
+    {
+        if (string.IsNullOrEmpty(account.ListenFromNpub) || string.IsNullOrEmpty(account.PublishPrivateKey))
+        {
+            Console.Error.WriteLine("ERROR: Each account must have both PublishPrivateKey and ListenFromNpub");
+            return 1;
+        }
+
+        var listenHex = ParsePubKeyHex(account.ListenFromNpub);
+        var pubKey = ParsePrivateKey(account.PublishPrivateKey);
+        accountMap[listenHex] = pubKey;
+        logger.LogInformation("Account: listen from {Listen}... -> publish as {Pub}...",
+            listenHex[..16], pubKey.CreateXOnlyPubKey().ToHex()[..16]);
+    }
+}
+else
+{
+    // Legacy single-account fallback
+    ECPrivKey publishPrivKey = string.IsNullOrEmpty(settings.Nostr.PublishPrivateKey)
+        ? dvmPrivKey
+        : ParsePrivateKey(settings.Nostr.PublishPrivateKey);
+    string listenFromPubKeyHex = ParsePubKeyHex(settings.Nostr.ListenFromNpub);
+    accountMap[listenFromPubKeyHex] = publishPrivKey;
+    logger.LogInformation("Account (legacy): listen from {Listen}... -> publish as {Pub}...",
+        listenFromPubKeyHex[..16], publishPrivKey.CreateXOnlyPubKey().ToHex()[..16]);
+}
+
+logger.LogInformation("DVM npub: {Npub}", dvmPrivKey.CreateXOnlyPubKey().ToNIP19());
+logger.LogInformation("Loaded {Count} account(s)", accountMap.Count);
 logger.LogInformation("Blossom server: {Url}", settings.Blossom.ServerUrl);
 logger.LogInformation("Event kind: {Kind}", settings.Nostr.EventKind);
 
 // Initialize services
 var relayClient = sp.GetRequiredService<NostrRelayClient>();
 var processor = sp.GetRequiredService<MessageProcessor>();
-processor.Initialize(dvmPrivKey, publishPrivKey, listenFromPubKeyHex);
+processor.Initialize(dvmPrivKey, accountMap);
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -88,6 +115,28 @@ Console.CancelKeyPress += (_, e) =>
 
 // Connect and subscribe
 await relayClient.ConnectAsync(dvmPrivKey, cts.Token);
+
+// Update publish account profiles with DVM npub
+var profileUpdater = sp.GetRequiredService<ProfileUpdater>();
+await profileUpdater.UpdateProfilesAsync(dvmPrivKey, accountMap, relayClient.Client, cts.Token);
+
+// Send startup notification DM to all listening keys
+var publisher = sp.GetRequiredService<EventPublisher>();
+var dvmNpub = dvmPrivKey.CreateXOnlyPubKey().ToNIP19();
+var startupMessage = $"DVM started (v{ProfileUpdater.BotVersion})\n\nDVM npub: {dvmNpub}\nAccounts: {accountMap.Count}\nRelays: {string.Join(", ", settings.Nostr.Relays)}\nEvent kind: {settings.Nostr.EventKind}";
+
+foreach (var listenPubKeyHex in accountMap.Keys)
+{
+    try
+    {
+        await publisher.SendDmReplyAsync(listenPubKeyHex, startupMessage, dvmPrivKey, relayClient.Client, cts.Token);
+        logger.LogInformation("Sent startup notification to {PubKey}", listenPubKeyHex[..16]);
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Failed to send startup notification to {PubKey}", listenPubKeyHex[..16]);
+    }
+}
 
 relayClient.GiftWrapReceived += async (sender, giftWrap) =>
 {

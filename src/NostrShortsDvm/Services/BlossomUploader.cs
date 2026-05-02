@@ -24,14 +24,14 @@ public class BlossomUploader
 
     /// <summary>
     /// Uploads the video file to the Blossom server per BUD-02.
-    /// The file is uploaded via PUT /upload with a Nostr auth header.
+    /// Returns null on success, or an error message on failure.
     /// </summary>
-    public async Task<bool> UploadAsync(VideoJob job, ECPrivKey signingKey, CancellationToken ct)
+    public async Task<string?> UploadAsync(VideoJob job, ECPrivKey signingKey, CancellationToken ct)
     {
         if (job.LocalFilePath == null || !File.Exists(job.LocalFilePath))
         {
             _logger.LogError("No file to upload");
-            return false;
+            return "No file to upload — download may have failed";
         }
 
         // Compute SHA-256 hash of the file using streaming (avoid loading entire file into memory)
@@ -80,7 +80,7 @@ public class BlossomUploader
         {
             var body = await response.Content.ReadAsStringAsync(ct);
             _logger.LogError("Blossom upload failed ({Status}): {Body}", response.StatusCode, body);
-            return false;
+            return $"Blossom upload failed ({response.StatusCode}): {body}";
         }
 
         var responseBody = await response.Content.ReadAsStringAsync(ct);
@@ -99,6 +99,6 @@ public class BlossomUploader
         }
 
         _logger.LogInformation("Uploaded to Blossom: {BlossomUrl}", job.BlossomUrl);
-        return true;
+        return null;
     }
 }

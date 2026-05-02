@@ -99,6 +99,7 @@ public class EventPublisher
 
     /// <summary>
     /// Publishes a nostr event (kind 1 or kind 34235) pointing to the blossom video.
+    /// If kind 34235, also publishes a kind 1 quote-repost so clients that don't support NIP-71 still show it.
     /// </summary>
     public async Task<string?> PublishVideoEventAsync(
         VideoJob job,
@@ -106,9 +107,11 @@ public class EventPublisher
         INostrClient client,
         CancellationToken ct)
     {
+        var publishPubKeyHex = publishKey.CreateXOnlyPubKey().ToHex();
+
         var evt = _settings.Nostr.EventKind == 34235
-            ? CreateNip71Event(job)
-            : CreateKind1Event(job);
+            ? CreateNip71Event(job, publishPubKeyHex)
+            : CreateKind1Event(job, publishPubKeyHex);
 
         await evt.ComputeIdAndSignAsync(publishKey);
 
@@ -117,6 +120,17 @@ public class EventPublisher
         await client.PublishEvent(evt, ct);
 
         job.EventId = evt.Id;
+
+        // If NIP-71, also publish a kind 1 quote-repost for client compatibility
+        if (_settings.Nostr.EventKind == 34235 && evt.Id != null)
+        {
+            var quoteNote = CreateQuoteRepost(evt.Id, publishPubKeyHex, job);
+            await quoteNote.ComputeIdAndSignAsync(publishKey);
+
+            _logger.LogInformation("Publishing kind 1 quote-repost: {Id}", quoteNote.Id);
+            await client.PublishEvent(quoteNote, ct);
+        }
+
         return evt.Id;
     }
 
@@ -177,7 +191,7 @@ public class EventPublisher
         }
     }
 
-    private NostrEvent CreateKind1Event(VideoJob job)
+    private NostrEvent CreateKind1Event(VideoJob job, string publishPubKeyHex)
     {
         var content = $"{job.BlossomUrl}";
         if (!string.IsNullOrEmpty(job.Title))
@@ -195,10 +209,21 @@ public class EventPublisher
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.OriginalUrl!] });
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
 
+        // Attribution: origin tag
+        if (!string.IsNullOrEmpty(job.VideoId))
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "origin", Data = [job.Platform, job.VideoId, job.OriginalUrl] });
+
+        // Attribution: creator p tag
+        if (!string.IsNullOrEmpty(job.CreatorPubKey))
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "p", Data = [job.CreatorPubKey] });
+
+        // Zap splits
+        AddZapTags(evt, job, publishPubKeyHex);
+
         return evt;
     }
 
-    private NostrEvent CreateNip71Event(VideoJob job)
+    private NostrEvent CreateNip71Event(VideoJob job, string publishPubKeyHex)
     {
         var evt = new NostrEvent
         {
@@ -221,7 +246,100 @@ public class EventPublisher
         // d-tag for addressable event
         evt.SetTag("d", job.FileHash ?? Guid.NewGuid().ToString());
 
+        // Attribution: origin tag
+        if (!string.IsNullOrEmpty(job.VideoId))
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "origin", Data = [job.Platform, job.VideoId, job.OriginalUrl] });
+
+        // Attribution: creator p tag
+        if (!string.IsNullOrEmpty(job.CreatorPubKey))
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "p", Data = [job.CreatorPubKey] });
+
+        // Zap splits
+        AddZapTags(evt, job, publishPubKeyHex);
+
         return evt;
+    }
+
+    private void AddZapTags(NostrEvent evt, VideoJob job, string publishPubKeyHex)
+    {
+        var defaultRelay = _settings.Nostr.Relays.FirstOrDefault() ?? "wss://relay.damus.io";
+        var defaultShare = _settings.Nostr.DefaultCreatorZapShare;
+
+        if (!string.IsNullOrEmpty(job.CreatorPubKey))
+        {
+            var creatorShare = job.CreatorZapShare ?? defaultShare;
+            var publisherShare = 100 - creatorShare;
+
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "zap", Data = [publishPubKeyHex, defaultRelay, publisherShare.ToString()] });
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "zap", Data = [job.CreatorPubKey, defaultRelay, creatorShare.ToString()] });
+        }
+        else
+        {
+            // 100% to publisher
+            evt.Tags.Add(new NostrEventTag { TagIdentifier = "zap", Data = [publishPubKeyHex, defaultRelay, "100"] });
+        }
+    }
+
+    /// <summary>
+    /// Creates a kind 1 note that quotes the NIP-71 video event, so clients that don't
+    /// support kind 34235 will still display the post in the feed.
+    /// Content includes description text + Blossom video URL for universal playback.
+    /// </summary>
+    private NostrEvent CreateQuoteRepost(string videoEventId, string publishPubKeyHex, VideoJob job)
+    {
+        var nevent = EncodeNevent(videoEventId, publishPubKeyHex, _settings.Nostr.Relays.FirstOrDefault());
+
+        // Build content: optional title/description, then blossom URL, then nevent reference
+        var contentParts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(job.Title))
+            contentParts.Add(job.Title);
+        if (!string.IsNullOrWhiteSpace(job.BlossomUrl))
+            contentParts.Add(job.BlossomUrl);
+        contentParts.Add($"nostr:{nevent}");
+
+        var evt = new NostrEvent
+        {
+            Kind = 1,
+            Content = string.Join("\n", contentParts),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        evt.Tags ??= [];
+        evt.Tags.Add(new NostrEventTag { TagIdentifier = "q", Data = [videoEventId, "", publishPubKeyHex] });
+
+        return evt;
+    }
+
+    /// <summary>
+    /// Encodes an event ID + optional relay + pubkey into NIP-19 nevent bech32 format.
+    /// TLV: type 0 = event id (32 bytes), type 1 = relay (utf8), type 2 = author pubkey (32 bytes)
+    /// </summary>
+    private static string EncodeNevent(string eventIdHex, string pubkeyHex, string? relay)
+    {
+        var tlv = new List<byte>();
+
+        // Type 0: event id
+        var eventIdBytes = Convert.FromHexString(eventIdHex);
+        tlv.Add(0);
+        tlv.Add((byte)eventIdBytes.Length);
+        tlv.AddRange(eventIdBytes);
+
+        // Type 1: relay (optional)
+        if (!string.IsNullOrEmpty(relay))
+        {
+            var relayBytes = System.Text.Encoding.UTF8.GetBytes(relay);
+            tlv.Add(1);
+            tlv.Add((byte)relayBytes.Length);
+            tlv.AddRange(relayBytes);
+        }
+
+        // Type 2: author pubkey
+        var pubkeyBytes = Convert.FromHexString(pubkeyHex);
+        tlv.Add(2);
+        tlv.Add((byte)pubkeyBytes.Length);
+        tlv.AddRange(pubkeyBytes);
+
+        return Bech32.Encode("nevent", tlv.ToArray());
     }
 
     private static DateTimeOffset RandomizeTimestamp()

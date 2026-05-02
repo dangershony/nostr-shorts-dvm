@@ -37,6 +37,19 @@ public class DuplicateTracker : IDisposable
                 event_id TEXT PRIMARY KEY NOT NULL,
                 processed_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS creator_earnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_url TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                platform_user_id TEXT,
+                creator_npub TEXT,
+                event_id TEXT,
+                blossom_url TEXT,
+                zap_share_percent INTEGER,
+                total_zaps_sats INTEGER DEFAULT 0,
+                claimed INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             """;
         cmd.ExecuteNonQuery();
         _logger.LogInformation("Database initialized");
@@ -102,6 +115,27 @@ public class DuplicateTracker : IDisposable
             """;
         cmd.Parameters.AddWithValue("@eventId", eventId);
         cmd.Parameters.AddWithValue("@processedAt", DateTime.UtcNow.ToString("o"));
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Tracks creator earnings for a published video.
+    /// </summary>
+    public void TrackCreatorEarnings(string originalUrl, string platform, string? platformUserId,
+        string? creatorNpub, string? eventId, string? blossomUrl, int? zapSharePercent)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO creator_earnings (original_url, platform, platform_user_id, creator_npub, event_id, blossom_url, zap_share_percent)
+            VALUES (@originalUrl, @platform, @platformUserId, @creatorNpub, @eventId, @blossomUrl, @zapSharePercent)
+            """;
+        cmd.Parameters.AddWithValue("@originalUrl", originalUrl);
+        cmd.Parameters.AddWithValue("@platform", platform);
+        cmd.Parameters.AddWithValue("@platformUserId", platformUserId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@creatorNpub", creatorNpub ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@eventId", eventId ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@blossomUrl", blossomUrl ?? (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@zapSharePercent", zapSharePercent ?? (object)DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 }

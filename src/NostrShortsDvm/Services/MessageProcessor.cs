@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using NBitcoin.Secp256k1;
 using NNostr.Client;
+using NNostr.Client.Protocols;
 using NostrShortsDvm.Config;
 using NostrShortsDvm.Nostr;
 
@@ -21,8 +22,7 @@ public class MessageProcessor
     private readonly ILogger<MessageProcessor> _logger;
 
     private ECPrivKey _dvmPrivKey = null!;
-    private ECPrivKey _publishPrivKey = null!;
-    private string _listenFromPubKeyHex = null!;
+    private Dictionary<string, ECPrivKey> _accountMap = null!;
 
     public MessageProcessor(
         AppSettings settings,
@@ -44,11 +44,10 @@ public class MessageProcessor
         _logger = logger;
     }
 
-    public void Initialize(ECPrivKey dvmPrivKey, ECPrivKey publishPrivKey, string listenFromPubKeyHex)
+    public void Initialize(ECPrivKey dvmPrivKey, Dictionary<string, ECPrivKey> accountMap)
     {
         _dvmPrivKey = dvmPrivKey;
-        _publishPrivKey = publishPrivKey;
-        _listenFromPubKeyHex = listenFromPubKeyHex;
+        _accountMap = accountMap;
     }
 
     public async Task ProcessGiftWrapAsync(NostrEvent giftWrap, INostrClient client, CancellationToken ct)
@@ -80,9 +79,9 @@ public class MessageProcessor
             return;
         }
 
-        if (!string.Equals(senderPubKey, _listenFromPubKeyHex, StringComparison.OrdinalIgnoreCase))
+        if (!_accountMap.TryGetValue(senderPubKey!, out var publishPrivKey))
         {
-            _logger.LogDebug("Ignoring DM from non-authorized pubkey: {PubKey}", senderPubKey[..8]);
+            _logger.LogDebug("Ignoring DM from non-authorized pubkey: {PubKey}", senderPubKey![..8]);
             return;
         }
 
@@ -98,8 +97,8 @@ public class MessageProcessor
         _logger.LogInformation("Received DM from authorized user: {Content}",
             rumor.Content?.Substring(0, Math.Min(100, rumor.Content?.Length ?? 0)));
 
-        // Step 3: Extract video URL
-        var job = _urlExtractor.Extract(rumor.Content ?? string.Empty);
+        // Step 3: Extract video URL, optional creator npub, and zap split
+        var job = _urlExtractor.ParseDmMessage(rumor.Content ?? string.Empty);
         if (job == null)
         {
             _logger.LogInformation("No supported video URL found in message");
@@ -109,7 +108,23 @@ public class MessageProcessor
             return;
         }
 
-        _logger.LogInformation("Found {Platform} URL: {Url}", job.Platform, job.OriginalUrl);
+        // Resolve creator pubkey to hex if provided as npub
+        if (!string.IsNullOrEmpty(job.CreatorPubKey) && job.CreatorPubKey.StartsWith("npub"))
+        {
+            try
+            {
+                var creatorKey = job.CreatorPubKey.FromNIP19Npub();
+                job.CreatorPubKey = creatorKey.ToHex();
+            }
+            catch
+            {
+                _logger.LogWarning("Invalid creator npub: {Npub}", job.CreatorPubKey);
+                job.CreatorPubKey = null;
+            }
+        }
+
+        _logger.LogInformation("Found {Platform} URL: {Url} (videoId={VideoId}, creator={Creator}, split={Split})",
+            job.Platform, job.OriginalUrl, job.VideoId, job.CreatorPubKey?[..8] ?? "none", job.CreatorZapShare?.ToString() ?? "default");
 
         // Step 4: Check for duplicates (DB first, then relay fallback)
         var existingUrl = _duplicateTracker.GetExistingBlossomUrl(job.OriginalUrl);
@@ -117,7 +132,7 @@ public class MessageProcessor
         {
             // Fallback: check relays for an existing event with this URL tag
             existingUrl = await _publisher.FindExistingVideoByUrlAsync(
-                job.OriginalUrl, _publishPrivKey, client, ct);
+                job.OriginalUrl, publishPrivKey, client, ct);
             if (existingUrl != null)
             {
                 // Re-populate the DB so we don't query relays again next time
@@ -135,10 +150,11 @@ public class MessageProcessor
         }
 
         // Step 5: Download video
-        if (!await _downloader.DownloadAsync(job, ct))
+        var downloadError = await _downloader.DownloadAsync(job, ct);
+        if (downloadError != null)
         {
             await _publisher.SendDmReplyAsync(senderPubKey,
-                $"Failed to download video from:\n{job.OriginalUrl}",
+                $"Failed to download video:\n{job.OriginalUrl}\n\nReason: {downloadError}",
                 _dvmPrivKey, client, ct);
             return;
         }
@@ -146,24 +162,33 @@ public class MessageProcessor
         try
         {
             // Step 6: Upload to Blossom
-            if (!await _uploader.UploadAsync(job, _publishPrivKey, ct))
+            var uploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
+            if (uploadError != null)
             {
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Failed to upload video to Blossom server:\n{job.OriginalUrl}",
+                    $"Failed to upload video to Blossom:\n{job.OriginalUrl}\n\nReason: {uploadError}",
                     _dvmPrivKey, client, ct);
                 return;
             }
 
             // Step 7: Publish nostr event
-            var eventId = await _publisher.PublishVideoEventAsync(job, _publishPrivKey, client, ct);
+            var eventId = await _publisher.PublishVideoEventAsync(job, publishPrivKey, client, ct);
 
             // Step 8: Track as processed
             _duplicateTracker.MarkProcessed(job.OriginalUrl, job.BlossomUrl!, eventId);
+
+            // Step 8b: Track creator earnings
+            _duplicateTracker.TrackCreatorEarnings(
+                job.OriginalUrl, job.Platform, job.PlatformUserId,
+                job.CreatorPubKey, eventId, job.BlossomUrl,
+                job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare);
 
             // Step 9: Reply with confirmation
             var replyMessage = $"Video uploaded and published!\n\nSource: {job.OriginalUrl}\nBlossom: {job.BlossomUrl}";
             if (eventId != null)
                 replyMessage += $"\nEvent: {eventId}";
+            if (!string.IsNullOrEmpty(job.CreatorPubKey))
+                replyMessage += $"\nCreator zap split: {job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare}%";
 
             await _publisher.SendDmReplyAsync(senderPubKey, replyMessage, _dvmPrivKey, client, ct);
 
