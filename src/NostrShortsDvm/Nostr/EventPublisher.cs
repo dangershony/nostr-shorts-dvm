@@ -193,9 +193,14 @@ public class EventPublisher
 
     private NostrEvent CreateKind1Event(VideoJob job, string publishPubKeyHex)
     {
-        var content = $"{job.BlossomUrl}";
+        var contentParts = new List<string>();
         if (!string.IsNullOrEmpty(job.Title))
-            content = $"{job.Title}\n\n{content}";
+            contentParts.Add(job.Title);
+        if (!string.IsNullOrEmpty(job.Description))
+            contentParts.Add(job.Description);
+        contentParts.Add(job.BlossomUrl!);
+
+        var content = string.Join("\n\n", contentParts);
 
         var evt = new NostrEvent
         {

@@ -12,6 +12,7 @@ public class VideoJob
     public string? BlossomUrl { get; set; }
     public string? EventId { get; set; }
     public string? Title { get; set; }
+    public string? Description { get; set; }
 
     /// <summary>
     /// Optional creator npub/hex pubkey provided in the DM.

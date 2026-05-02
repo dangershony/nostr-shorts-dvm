@@ -26,7 +26,7 @@ public class VideoDownloader
 
         var outputTemplate = Path.Combine(_settings.YtDlp.TempDir, "%(id)s.%(ext)s");
 
-        var args = $"--no-playlist --no-warnings --max-filesize 100M -o \"{outputTemplate}\" --print after_move:filepath \"{job.OriginalUrl}\"";
+        var args = $"--no-playlist --no-warnings --max-filesize 100M -o \"{outputTemplate}\" --print before_dl:title --print before_dl:description --print after_move:filepath \"{job.OriginalUrl}\"";
 
         _logger.LogInformation("Downloading video: {Url}", job.OriginalUrl);
 
@@ -58,13 +58,29 @@ public class VideoDownloader
             return $"yt-dlp failed (exit code {process.ExitCode}): {stderr.Trim()}";
         }
 
-        var filePath = stdout.Trim().Split('\n').Last().Trim();
+        var lines = stdout.Trim().Split('\n').Select(l => l.Trim()).Where(l => !string.IsNullOrEmpty(l)).ToArray();
+
+        // Output format: title (1 line), description (may be multi-line), filepath (last line)
+        // The filepath is always the last line and is a valid file path
+        if (lines.Length == 0)
+        {
+            _logger.LogError("yt-dlp produced no output");
+            return "yt-dlp produced no output";
+        }
+
+        var filePath = lines.Last();
 
         if (!File.Exists(filePath))
         {
             _logger.LogError("yt-dlp output file not found: {FilePath}", filePath);
             return $"Downloaded file not found at: {filePath}";
         }
+
+        // First line is title, everything between first and last is description
+        if (lines.Length >= 2)
+            job.Title = lines[0];
+        if (lines.Length >= 3)
+            job.Description = string.Join("\n", lines[1..^1]);
 
         job.LocalFilePath = filePath;
         job.MimeType = GetMimeType(filePath);
