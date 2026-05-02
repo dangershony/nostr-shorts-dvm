@@ -76,6 +76,7 @@ public class BlossomUploader
                 using var fileStream = File.OpenRead(job.LocalFilePath);
                 using var content = new StreamContent(fileStream);
                 content.Headers.ContentType = new MediaTypeHeaderValue(job.MimeType ?? "application/octet-stream");
+                content.Headers.ContentLength = fileStream.Length;
 
                 using var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
                 {
