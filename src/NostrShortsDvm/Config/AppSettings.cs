@@ -41,7 +41,7 @@ public class NostrSettings
     /// <summary>
     /// Event kind to publish: 1 (note) or 34235 (NIP-71 video).
     /// </summary>
-    public int EventKind { get; set; } = 34235;
+    public int EventKind { get; set; } = 1;
 
     /// <summary>
     /// Default zap share percentage for the creator when a creator pubkey is provided (0-100).
