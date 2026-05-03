@@ -195,9 +195,9 @@ public class EventPublisher
     {
         var contentParts = new List<string>();
         if (!string.IsNullOrEmpty(job.Title))
-            contentParts.Add(job.Title);
+            contentParts.Add("> " + job.Title.Replace("\n", "\n> "));
         if (job.IncludeDescription && !string.IsNullOrEmpty(job.Description))
-            contentParts.Add(job.Description);
+            contentParts.Add("> " + job.Description.Replace("\n", "\n> "));
         contentParts.Add(job.BlossomUrl!);
 
         var content = string.Join("\n\n", contentParts);
