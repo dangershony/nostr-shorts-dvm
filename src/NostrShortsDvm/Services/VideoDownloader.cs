@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using NostrShortsDvm.Config;
 using NostrShortsDvm.Models;
@@ -78,7 +79,7 @@ public class VideoDownloader
 
         // First line is title, everything between first and last is description
         if (lines.Length >= 2)
-            job.Title = lines[0];
+            job.Title = CleanTitle(lines[0]);
         if (lines.Length >= 3)
             job.Description = string.Join("\n", lines[1..^1]);
 
@@ -122,5 +123,34 @@ public class VideoDownloader
             ".flv" => "video/x-flv",
             _ => "video/mp4"
         };
+    }
+
+    /// <summary>
+    /// Cleans up the video title: strips view/reaction counts and social media metadata,
+    /// and caps at a reasonable length. Facebook/Instagram titles often contain the full post text.
+    /// </summary>
+    private static string CleanTitle(string title)
+    {
+        // Remove common social media metadata patterns like "88K views · 1.6K reactions |"
+        title = Regex.Replace(title, @"[\d.]+[KMB]?\s*views?\s*·?\s*", "", RegexOptions.IgnoreCase);
+        title = Regex.Replace(title, @"[\d.]+[KMB]?\s*reactions?\s*·?\s*", "", RegexOptions.IgnoreCase);
+        title = Regex.Replace(title, @"[\d.]+[KMB]?\s*likes?\s*·?\s*", "", RegexOptions.IgnoreCase);
+
+        // Remove leading/trailing pipe separators and whitespace
+        title = title.Trim(' ', '|', '·');
+
+        // If there are pipe-separated segments, take the longest one (likely the actual content)
+        if (title.Contains('|'))
+        {
+            var segments = title.Split('|').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+            if (segments.Length > 0)
+                title = segments.OrderByDescending(s => s.Length).First();
+        }
+
+        // Cap at 200 characters
+        if (title.Length > 200)
+            title = title[..200].Trim() + "…";
+
+        return title.Trim();
     }
 }
