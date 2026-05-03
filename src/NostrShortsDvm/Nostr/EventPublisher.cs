@@ -196,7 +196,7 @@ public class EventPublisher
         var contentParts = new List<string>();
         if (!string.IsNullOrEmpty(job.Title))
             contentParts.Add(job.Title);
-        if (!string.IsNullOrEmpty(job.Description))
+        if (job.IncludeDescription && !string.IsNullOrEmpty(job.Description))
             contentParts.Add(job.Description);
         contentParts.Add(job.BlossomUrl!);
 

@@ -123,8 +123,8 @@ public class MessageProcessor
             }
         }
 
-        _logger.LogInformation("Found {Platform} URL: {Url} (videoId={VideoId}, creator={Creator}, split={Split})",
-            job.Platform, job.OriginalUrl, job.VideoId, job.CreatorPubKey?[..8] ?? "none", job.CreatorZapShare?.ToString() ?? "default");
+        _logger.LogInformation("Found {Platform} URL: {Url} (videoId={VideoId}, creator={Creator}, split={Split}, desc={Desc})",
+            job.Platform, job.OriginalUrl, job.VideoId, job.CreatorPubKey?[..8] ?? "none", job.CreatorZapShare?.ToString() ?? "default", job.IncludeDescription);
 
         // Step 4: Check for duplicates (DB first, then relay fallback)
         var existingUrl = _duplicateTracker.GetExistingBlossomUrl(job.OriginalUrl);

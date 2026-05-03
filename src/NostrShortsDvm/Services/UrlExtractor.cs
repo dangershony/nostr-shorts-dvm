@@ -69,6 +69,13 @@ public class UrlExtractor
         if (string.IsNullOrEmpty(remaining))
             return job;
 
+        // Check for -d flag (include description)
+        if (remaining.Contains("-d", StringComparison.OrdinalIgnoreCase))
+        {
+            job.IncludeDescription = true;
+            remaining = remaining.Replace("-d", "", StringComparison.OrdinalIgnoreCase).Trim();
+        }
+
         var tokens = remaining.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
         // First token after URL: npub or hex pubkey
