@@ -154,9 +154,13 @@ public class EventPublisher
             {
                 Kind = 14,
                 Content = message,
+                PublicKey = senderPubKey.ToHex(),
                 CreatedAt = DateTimeOffset.UtcNow
             };
             rumor.SetTag("p", recipientPubKeyHex);
+
+            // Compute rumor id (NIP-17: rumor has id but no signature)
+            rumor.Id = rumor.ComputeId();
 
             var rumorJson = JsonSerializer.Serialize(rumor);
 
