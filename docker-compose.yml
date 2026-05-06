@@ -7,6 +7,13 @@ services:
       - dvm-temp:/app/temp
     restart: unless-stopped
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
 volumes:
   dvm-data:
   dvm-temp:
+  ollama-data:

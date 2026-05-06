@@ -52,6 +52,8 @@ services.AddSingleton<VideoDownloader>();
 services.AddSingleton<BlossomUploader>();
 services.AddSingleton<EventPublisher>();
 services.AddSingleton<NostrRelayClient>();
+services.AddSingleton<OllamaSummarizer>();
+services.AddSingleton<PendingJobTracker>();
 services.AddSingleton<MessageProcessor>();
 services.AddSingleton<ProfileUpdater>();
 services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromMinutes(10) });

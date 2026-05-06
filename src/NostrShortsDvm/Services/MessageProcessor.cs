@@ -9,6 +9,7 @@ namespace NostrShortsDvm.Services;
 
 /// <summary>
 /// Orchestrates the full pipeline: decrypt DM -> extract URL -> check dupe -> download -> upload -> publish -> reply.
+/// Supports interactive summary approval flow when descriptions are long.
 /// </summary>
 public class MessageProcessor
 {
@@ -19,6 +20,8 @@ public class MessageProcessor
     private readonly VideoDownloader _downloader;
     private readonly BlossomUploader _uploader;
     private readonly EventPublisher _publisher;
+    private readonly OllamaSummarizer _summarizer;
+    private readonly PendingJobTracker _pendingJobs;
     private readonly ILogger<MessageProcessor> _logger;
 
     private ECPrivKey _dvmPrivKey = null!;
@@ -32,6 +35,8 @@ public class MessageProcessor
         VideoDownloader downloader,
         BlossomUploader uploader,
         EventPublisher publisher,
+        OllamaSummarizer summarizer,
+        PendingJobTracker pendingJobs,
         ILogger<MessageProcessor> logger)
     {
         _settings = settings;
@@ -41,6 +46,8 @@ public class MessageProcessor
         _downloader = downloader;
         _uploader = uploader;
         _publisher = publisher;
+        _summarizer = summarizer;
+        _pendingJobs = pendingJobs;
         _logger = logger;
     }
 
@@ -94,16 +101,21 @@ public class MessageProcessor
             return;
         }
 
+        var messageText = rumor.Content?.Trim() ?? string.Empty;
         _logger.LogInformation("Received DM from authorized user: {Content}",
-            rumor.Content?.Substring(0, Math.Min(100, rumor.Content?.Length ?? 0)));
+            messageText.Substring(0, Math.Min(100, messageText.Length)));
+
+        // Check if this is a reply to a pending summary approval
+        if (await HandlePendingReplyAsync(senderPubKey, messageText, publishPrivKey, client, ct))
+            return;
 
         // Step 3: Extract video URL, optional creator npub, and zap split
-        var job = _urlExtractor.ParseDmMessage(rumor.Content ?? string.Empty);
+        var job = _urlExtractor.ParseDmMessage(messageText);
         if (job == null)
         {
             _logger.LogInformation("No supported video URL found in message");
             await _publisher.SendDmReplyAsync(senderPubKey,
-                "No supported video URL found in your message. Supported: YouTube, TikTok, Instagram, Facebook, X/Twitter.",
+                "No supported video URL found in your message.\n\nUsage: <url> [npub] [split%]\n\nOptions:\n• -d — include full description\n• -ns — no summary, publish with title only\n\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter",
                 _dvmPrivKey, client, ct);
             return;
         }
@@ -123,21 +135,18 @@ public class MessageProcessor
             }
         }
 
-        _logger.LogInformation("Found {Platform} URL: {Url} (videoId={VideoId}, creator={Creator}, split={Split}, desc={Desc})",
-            job.Platform, job.OriginalUrl, job.VideoId, job.CreatorPubKey?[..8] ?? "none", job.CreatorZapShare?.ToString() ?? "default", job.IncludeDescription);
+        _logger.LogInformation("Found {Platform} URL: {Url} (videoId={VideoId}, creator={Creator}, split={Split}, desc={Desc}, ns={Ns})",
+            job.Platform, job.OriginalUrl, job.VideoId, job.CreatorPubKey?[..8] ?? "none",
+            job.CreatorZapShare?.ToString() ?? "default", job.IncludeDescription, job.NoSummary);
 
         // Step 4: Check for duplicates (DB first, then relay fallback)
         var existingUrl = _duplicateTracker.GetExistingBlossomUrl(job.OriginalUrl);
         if (existingUrl == null)
         {
-            // Fallback: check relays for an existing event with this URL tag
             existingUrl = await _publisher.FindExistingVideoByUrlAsync(
                 job.OriginalUrl, publishPrivKey, client, ct);
             if (existingUrl != null)
-            {
-                // Re-populate the DB so we don't query relays again next time
                 _duplicateTracker.MarkProcessed(job.OriginalUrl, existingUrl, null);
-            }
         }
 
         if (existingUrl != null)
@@ -171,33 +180,163 @@ public class MessageProcessor
                 return;
             }
 
-            // Step 7: Publish nostr event
-            var eventId = await _publisher.PublishVideoEventAsync(job, publishPrivKey, client, ct);
+            // Step 7: Summarization decision
+            var description = job.Description ?? job.Title ?? string.Empty;
+            var shouldSummarize = !job.NoSummary
+                && !job.IncludeDescription
+                && description.Length >= _settings.Ollama.MinDescriptionLength;
 
-            // Step 8: Track as processed
-            _duplicateTracker.MarkProcessed(job.OriginalUrl, job.BlossomUrl!, eventId);
+            if (shouldSummarize)
+            {
+                // Try to generate a summary and ask for approval
+                var summary = await _summarizer.SummarizeAsync(
+                    job.Title ?? "", job.Description ?? "", false, ct);
 
-            // Step 8b: Track creator earnings
-            _duplicateTracker.TrackCreatorEarnings(
-                job.OriginalUrl, job.Platform, job.PlatformUserId,
-                job.CreatorPubKey, eventId, job.BlossomUrl,
-                job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare);
+                if (summary != null)
+                {
+                    // Store the job and wait for user reply
+                    _pendingJobs.SetPending(senderPubKey, job, summary);
 
-            // Step 9: Reply with confirmation
-            var replyMessage = $"Video uploaded and published!\n\nSource: {job.OriginalUrl}\nBlossom: {job.BlossomUrl}";
-            if (eventId != null)
-                replyMessage += $"\nEvent: {eventId}";
-            if (!string.IsNullOrEmpty(job.CreatorPubKey))
-                replyMessage += $"\nCreator zap split: {job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare}%";
+                    await _publisher.SendDmReplyAsync(senderPubKey,
+                        $"Video uploaded! Proposed summary:\n\n\"{summary}\"\n\nReply:\n• yes — publish with this summary\n• shorter — make it shorter\n• ns — publish with no summary (title only)",
+                        _dvmPrivKey, client, ct);
 
-            await _publisher.SendDmReplyAsync(senderPubKey, replyMessage, _dvmPrivKey, client, ct);
+                    _logger.LogInformation("Waiting for summary approval from {PubKey}", senderPubKey[..8]);
+                    return;
+                }
 
-            _logger.LogInformation("Successfully processed {Url} -> {BlossomUrl}", job.OriginalUrl, job.BlossomUrl);
+                // Ollama unavailable — fall back to truncated description with hashtags removed
+                _logger.LogWarning("Ollama unavailable, falling back to truncated description");
+                var cleaned = System.Text.RegularExpressions.Regex.Replace(description, @"#\S+", "").Trim();
+                cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s{2,}", " ");
+                var fallback = cleaned.Length > 150 ? cleaned[..147] + "..." : cleaned;
+                job.Title = fallback;
+                job.Description = null;
+            }
+
+            // Step 8: Publish (no summary or -ns flag)
+            await PublishAndConfirmAsync(job, senderPubKey, publishPrivKey, client, ct);
         }
         finally
         {
-            // Cleanup temp file
-            _downloader.Cleanup(job);
+            // Only cleanup if not pending (pending jobs keep the file for potential re-publish)
+            if (!_pendingJobs.HasPending(senderPubKey))
+                _downloader.Cleanup(job);
         }
+    }
+
+    /// <summary>
+    /// Handles replies to pending summary approvals.
+    /// Returns true if the message was handled as a reply.
+    /// </summary>
+    private async Task<bool> HandlePendingReplyAsync(
+        string senderPubKey, string message, ECPrivKey publishPrivKey, INostrClient client, CancellationToken ct)
+    {
+        if (!_pendingJobs.HasPending(senderPubKey))
+            return false;
+
+        var normalizedMessage = message.Trim().ToLowerInvariant();
+
+        // If it's a new video URL, cancel the pending job and let it process normally
+        var newJob = _urlExtractor.ParseDmMessage(message);
+        if (newJob != null)
+        {
+            var cancelled = _pendingJobs.TakeJob(senderPubKey);
+            if (cancelled != null)
+            {
+                _downloader.Cleanup(cancelled.Job);
+                _logger.LogInformation("Cancelled pending job due to new URL from {PubKey}", senderPubKey[..8]);
+            }
+            return false; // Let the normal flow handle the new URL
+        }
+
+        // Handle known commands
+        if (normalizedMessage == "yes" || normalizedMessage == "shorter" || normalizedMessage == "ns")
+        {
+            var pending = _pendingJobs.TakeJob(senderPubKey);
+            if (pending == null)
+            {
+                await _publisher.SendDmReplyAsync(senderPubKey,
+                    "That pending job has expired. Please send the video URL again.",
+                    _dvmPrivKey, client, ct);
+                return true;
+            }
+
+            var job = pending.Job;
+
+            try
+            {
+                switch (normalizedMessage)
+                {
+                    case "yes":
+                        job.Title = pending.ProposedSummary;
+                        job.Description = null;
+                        job.IncludeDescription = false;
+                        await PublishAndConfirmAsync(job, senderPubKey, publishPrivKey, client, ct);
+                        break;
+
+                    case "shorter":
+                        var shorterSummary = await _summarizer.SummarizeAsync(
+                            pending.Job.Title ?? "", pending.Job.Description ?? "", shorter: true, ct);
+
+                        if (shorterSummary != null)
+                        {
+                            _pendingJobs.SetPending(senderPubKey, job, shorterSummary);
+                            await _publisher.SendDmReplyAsync(senderPubKey,
+                                $"Shorter summary:\n\n\"{shorterSummary}\"\n\nReply: yes / shorter / ns",
+                                _dvmPrivKey, client, ct);
+                        }
+                        else
+                        {
+                            await PublishAndConfirmAsync(job, senderPubKey, publishPrivKey, client, ct);
+                        }
+                        break;
+
+                    case "ns":
+                        job.Description = null;
+                        job.IncludeDescription = false;
+                        await PublishAndConfirmAsync(job, senderPubKey, publishPrivKey, client, ct);
+                        break;
+                }
+            }
+            finally
+            {
+                if (!_pendingJobs.HasPending(senderPubKey))
+                    _downloader.Cleanup(job);
+            }
+
+            return true;
+        }
+
+        // Unrecognized reply while a job is pending — remind them
+        await _publisher.SendDmReplyAsync(senderPubKey,
+            "You have a pending video awaiting approval.\n\nReply:\n• yes — publish with proposed summary\n• shorter — make it shorter\n• ns — publish with no summary",
+            _dvmPrivKey, client, ct);
+        return true;
+    }
+
+    /// <summary>
+    /// Publishes the event and sends a confirmation DM.
+    /// </summary>
+    private async Task PublishAndConfirmAsync(
+        Models.VideoJob job, string senderPubKey, ECPrivKey publishPrivKey, INostrClient client, CancellationToken ct)
+    {
+        var eventId = await _publisher.PublishVideoEventAsync(job, publishPrivKey, client, ct);
+
+        _duplicateTracker.MarkProcessed(job.OriginalUrl, job.BlossomUrl!, eventId);
+        _duplicateTracker.TrackCreatorEarnings(
+            job.OriginalUrl, job.Platform, job.PlatformUserId,
+            job.CreatorPubKey, eventId, job.BlossomUrl,
+            job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare);
+
+        var replyMessage = $"Video published!\n\nSource: {job.OriginalUrl}\nBlossom: {job.BlossomUrl}";
+        if (eventId != null)
+            replyMessage += $"\nEvent: {eventId}";
+        if (!string.IsNullOrEmpty(job.CreatorPubKey))
+            replyMessage += $"\nCreator zap split: {job.CreatorZapShare ?? _settings.Nostr.DefaultCreatorZapShare}%";
+
+        await _publisher.SendDmReplyAsync(senderPubKey, replyMessage, _dvmPrivKey, client, ct);
+
+        _logger.LogInformation("Successfully processed {Url} -> {BlossomUrl}", job.OriginalUrl, job.BlossomUrl);
     }
 }

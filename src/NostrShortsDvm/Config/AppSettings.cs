@@ -6,6 +6,7 @@ public class AppSettings
     public BlossomSettings Blossom { get; set; } = new();
     public YtDlpSettings YtDlp { get; set; } = new();
     public DatabaseSettings Database { get; set; } = new();
+    public OllamaSettings Ollama { get; set; } = new();
 }
 
 public class NostrSettings
@@ -68,6 +69,18 @@ public class YtDlpSettings
 public class DatabaseSettings
 {
     public string Path { get; set; } = "/app/data/processed.db";
+}
+
+public class OllamaSettings
+{
+    public string BaseUrl { get; set; } = "http://ollama:11434";
+    public string Model { get; set; } = "llama3.2:1b";
+
+    /// <summary>
+    /// Minimum description length (chars) to trigger summarization prompt.
+    /// Shorter descriptions are used as-is.
+    /// </summary>
+    public int MinDescriptionLength { get; set; } = 100;
 }
 
 /// <summary>

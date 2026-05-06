@@ -76,6 +76,13 @@ public class UrlExtractor
             remaining = remaining.Replace("-d", "", StringComparison.OrdinalIgnoreCase).Trim();
         }
 
+        // Check for -ns flag (no summary, publish immediately without description)
+        if (remaining.Contains("-ns", StringComparison.OrdinalIgnoreCase))
+        {
+            job.NoSummary = true;
+            remaining = remaining.Replace("-ns", "", StringComparison.OrdinalIgnoreCase).Trim();
+        }
+
         var tokens = remaining.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
         // First token after URL: npub or hex pubkey

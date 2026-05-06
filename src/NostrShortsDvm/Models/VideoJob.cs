@@ -16,6 +16,11 @@ public class VideoJob
     public bool IncludeDescription { get; set; }
 
     /// <summary>
+    /// If true, skip summarization and publish with no summary/description.
+    /// </summary>
+    public bool NoSummary { get; set; }
+
+    /// <summary>
     /// Optional creator npub/hex pubkey provided in the DM.
     /// </summary>
     public string? CreatorPubKey { get; set; }
