@@ -154,6 +154,20 @@ relayClient.GiftWrapReceived += async (sender, giftWrap) =>
 
 logger.LogInformation("Nostr Shorts DVM is running. Press Ctrl+C to stop.");
 
+// Health check: write timestamp file periodically for Docker health check
+var healthTimer = new System.Threading.Timer(_ =>
+{
+    try
+    {
+        var healthy = relayClient.IsHealthy();
+        if (healthy)
+            File.WriteAllText("/app/data/healthcheck", DateTimeOffset.UtcNow.ToString("O"));
+        else
+            File.Delete("/app/data/healthcheck");
+    }
+    catch { /* ignore */ }
+}, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
+
 // Keep running until cancelled
 try
 {
@@ -163,6 +177,8 @@ catch (OperationCanceledException)
 {
     // Expected
 }
+
+healthTimer.Dispose();
 
 await relayClient.DisposeAsync();
 sp.GetRequiredService<DuplicateTracker>().Dispose();
