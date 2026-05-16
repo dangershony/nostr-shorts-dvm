@@ -126,4 +126,60 @@ public class OllamaSummarizer
             _logger.LogWarning(ex, "Failed to ensure Ollama model");
         }
     }
+
+    /// <summary>
+    /// Formats a raw API error message into a friendly, readable message for the user.
+    /// Falls back to the raw error if Ollama is unavailable.
+    /// </summary>
+    public async Task<string> FormatErrorAsync(string rawError, string context, CancellationToken ct = default)
+    {
+        var prompt = $"""
+            You are a helpful assistant. A user sent a request to a video processing bot and it failed.
+            Rewrite the following technical error into a short, friendly message (2-3 sentences max).
+            Explain what went wrong and what the user can do to fix it, if anything.
+            Do NOT include any code, JSON, or technical jargon.
+            Just return the friendly message, nothing else.
+
+            Context: {context}
+            Error: {rawError}
+            """;
+
+        try
+        {
+            var requestBody = new
+            {
+                model = _settings.Ollama.Model,
+                prompt = prompt,
+                stream = false
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(
+                $"{_settings.Ollama.BaseUrl.TrimEnd('/')}/api/generate", content, ct);
+
+            if (!response.IsSuccessStatusCode)
+                return rawError;
+
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(responseBody);
+
+            if (doc.RootElement.TryGetProperty("response", out var responseProp))
+            {
+                var formatted = responseProp.GetString()?.Trim().Trim('"');
+                if (!string.IsNullOrWhiteSpace(formatted))
+                {
+                    _logger.LogDebug("Formatted error: {Formatted}", formatted);
+                    return formatted;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to format error via Ollama, using raw error");
+        }
+
+        return rawError;
+    }
 }

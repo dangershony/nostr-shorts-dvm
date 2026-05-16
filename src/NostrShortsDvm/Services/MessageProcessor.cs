@@ -343,8 +343,9 @@ public class MessageProcessor
             var sourceUploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
             if (sourceUploadError != null)
             {
+                var friendlyError = await _summarizer.FormatErrorAsync(sourceUploadError, "uploading source video to Blossom server", ct);
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Failed to upload source video to Blossom:\n\nReason: {sourceUploadError}",
+                    $"Video edit failed:\n\n{friendlyError}",
                     _dvmPrivKey, client, ct);
                 return;
             }
@@ -356,8 +357,9 @@ public class MessageProcessor
             var editError = await _videoEditor.EditAsync(job, sourceBlossomUrl, ct);
             if (editError != null)
             {
+                var friendlyError = await _summarizer.FormatErrorAsync(editError, "AI video editing via Replicate", ct);
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Video editing failed:\n{job.OriginalUrl}\n\nReason: {editError}",
+                    $"Video edit failed:\n\n{friendlyError}",
                     _dvmPrivKey, client, ct);
                 return;
             }
@@ -373,8 +375,9 @@ public class MessageProcessor
             var editedUploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
             if (editedUploadError != null)
             {
+                var friendlyError = await _summarizer.FormatErrorAsync(editedUploadError, "uploading edited video to Blossom server", ct);
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Failed to upload edited video to Blossom:\n\nReason: {editedUploadError}",
+                    $"Video edit failed:\n\n{friendlyError}",
                     _dvmPrivKey, client, ct);
                 return;
             }
