@@ -88,11 +88,12 @@ public class VideoEditor
     /// </summary>
     private async Task<string?> CreatePredictionAsync(string videoUrl, string editPrompt, CancellationToken ct)
     {
-        var url = $"{ReplicateApiBase}/predictions";
+        // Use the model-specific predictions endpoint: /v1/models/{owner}/{name}/predictions
+        var model = _settings.VideoEdit.Model; // e.g. "alibaba/happyhorse-1.0"
+        var url = $"{ReplicateApiBase}/models/{model}/predictions";
 
         var payload = new
         {
-            model = _settings.VideoEdit.Model,
             input = new Dictionary<string, object>
             {
                 ["video"] = videoUrl,
