@@ -14,7 +14,7 @@ namespace NostrShortsDvm.Nostr;
 /// </summary>
 public class ProfileUpdater
 {
-    public const string BotVersion = "0.0.3";
+    public const string BotVersion = "0.0.4";
 
     private readonly AppSettings _settings;
     private readonly ILogger<ProfileUpdater> _logger;

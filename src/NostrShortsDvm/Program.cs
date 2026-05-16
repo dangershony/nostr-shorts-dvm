@@ -53,6 +53,7 @@ services.AddSingleton<BlossomUploader>();
 services.AddSingleton<EventPublisher>();
 services.AddSingleton<NostrRelayClient>();
 services.AddSingleton<OllamaSummarizer>();
+services.AddSingleton<VideoEditor>();
 services.AddSingleton<PendingJobTracker>();
 services.AddSingleton<MessageProcessor>();
 services.AddSingleton<ProfileUpdater>();

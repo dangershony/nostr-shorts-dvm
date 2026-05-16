@@ -7,6 +7,7 @@ public class AppSettings
     public YtDlpSettings YtDlp { get; set; } = new();
     public DatabaseSettings Database { get; set; } = new();
     public OllamaSettings Ollama { get; set; } = new();
+    public VideoEditSettings VideoEdit { get; set; } = new();
 }
 
 public class NostrSettings
@@ -81,6 +82,30 @@ public class OllamaSettings
     /// Shorter descriptions are used as-is.
     /// </summary>
     public int MinDescriptionLength { get; set; } = 100;
+}
+
+public class VideoEditSettings
+{
+    /// <summary>
+    /// Replicate API token for video editing requests.
+    /// </summary>
+    public string ReplicateApiToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Replicate model version to use for video editing.
+    /// Default: alibaba/happyhorse-1.0 (video-edit endpoint).
+    /// </summary>
+    public string Model { get; set; } = "alibaba/happyhorse-1.0";
+
+    /// <summary>
+    /// Maximum time to wait for a video edit prediction to complete (seconds).
+    /// </summary>
+    public int TimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Whether video editing is enabled. Requires ReplicateApiToken.
+    /// </summary>
+    public bool Enabled => !string.IsNullOrEmpty(ReplicateApiToken);
 }
 
 /// <summary>

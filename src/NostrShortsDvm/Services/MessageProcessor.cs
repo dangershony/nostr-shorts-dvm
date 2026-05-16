@@ -21,6 +21,7 @@ public class MessageProcessor
     private readonly BlossomUploader _uploader;
     private readonly EventPublisher _publisher;
     private readonly OllamaSummarizer _summarizer;
+    private readonly VideoEditor _videoEditor;
     private readonly PendingJobTracker _pendingJobs;
     private readonly ILogger<MessageProcessor> _logger;
 
@@ -36,6 +37,7 @@ public class MessageProcessor
         BlossomUploader uploader,
         EventPublisher publisher,
         OllamaSummarizer summarizer,
+        VideoEditor videoEditor,
         PendingJobTracker pendingJobs,
         ILogger<MessageProcessor> logger)
     {
@@ -47,6 +49,7 @@ public class MessageProcessor
         _uploader = uploader;
         _publisher = publisher;
         _summarizer = summarizer;
+        _videoEditor = videoEditor;
         _pendingJobs = pendingJobs;
         _logger = logger;
     }
@@ -115,7 +118,7 @@ public class MessageProcessor
         {
             _logger.LogInformation("No supported video URL found in message");
             await _publisher.SendDmReplyAsync(senderPubKey,
-                "No supported video URL found in your message.\n\nUsage: <url> [npub] [split%]\n\nOptions:\n• -d — include full description\n• -ns — no summary, publish with title only\n\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter",
+                "No supported video URL found in your message.\n\nUsage: <url> [npub] [split%]\n\nOptions:\n• -d — include full description\n• -ns — no summary, publish with title only\n• !edit <prompt> — AI video editing (e.g. !edit make it a cartoon)\n\nSupported: YouTube, TikTok, Instagram, Facebook, X/Twitter",
                 _dvmPrivKey, client, ct);
             return;
         }
@@ -170,7 +173,14 @@ public class MessageProcessor
 
         try
         {
-            // Step 6: Upload to Blossom
+            // Step 6: If this is an edit request, process through AI video editor
+            if (job.IsEditRequest)
+            {
+                await ProcessEditRequestAsync(job, senderPubKey, publishPrivKey, client, ct);
+                return;
+            }
+
+            // Step 7: Upload to Blossom
             var uploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
             if (uploadError != null)
             {
@@ -313,6 +323,66 @@ public class MessageProcessor
             "You have a pending video awaiting approval.\n\nReply:\n• yes — publish with proposed summary\n• shorter — make it shorter\n• ns — publish with no summary",
             _dvmPrivKey, client, ct);
         return true;
+    }
+
+    /// <summary>
+    /// Processes a video editing request: edit via AI, upload to Blossom, send preview link.
+    /// The user can then reply "yes" to publish or provide feedback.
+    /// </summary>
+    private async Task ProcessEditRequestAsync(
+        Models.VideoJob job, string senderPubKey, ECPrivKey publishPrivKey, INostrClient client, CancellationToken ct)
+    {
+        try
+        {
+            await _publisher.SendDmReplyAsync(senderPubKey,
+                $"Processing video edit request...\n\nPrompt: \"{job.EditPrompt}\"\n\nThis may take several minutes.",
+                _dvmPrivKey, client, ct);
+
+            // Edit the video via Replicate API
+            var editError = await _videoEditor.EditAsync(job, ct);
+            if (editError != null)
+            {
+                await _publisher.SendDmReplyAsync(senderPubKey,
+                    $"Video editing failed:\n{job.OriginalUrl}\n\nReason: {editError}",
+                    _dvmPrivKey, client, ct);
+                return;
+            }
+
+            // Swap the local file path to the edited version for upload
+            var originalPath = job.LocalFilePath;
+            job.LocalFilePath = job.EditedFilePath;
+
+            // Upload the edited video to Blossom
+            var uploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
+            if (uploadError != null)
+            {
+                await _publisher.SendDmReplyAsync(senderPubKey,
+                    $"Failed to upload edited video to Blossom:\n\nReason: {uploadError}",
+                    _dvmPrivKey, client, ct);
+                return;
+            }
+
+            // Store as pending — let the user preview before publishing
+            job.Title = $"Edited: {job.EditPrompt}";
+            job.Description = null;
+            _pendingJobs.SetPending(senderPubKey, job, job.Title);
+
+            await _publisher.SendDmReplyAsync(senderPubKey,
+                $"Video edited and uploaded!\n\nPreview: {job.BlossomUrl}\n\nEdit prompt: \"{job.EditPrompt}\"\n\nReply:\n• yes — publish to Nostr\n• ns — discard (don't publish)",
+                _dvmPrivKey, client, ct);
+
+            _logger.LogInformation("Edit complete for {Url}, awaiting approval. Blossom: {BlossomUrl}",
+                job.OriginalUrl, job.BlossomUrl);
+        }
+        finally
+        {
+            // Clean up edited file if not pending
+            if (!_pendingJobs.HasPending(senderPubKey))
+            {
+                _videoEditor.CleanupEdited(job);
+                _downloader.Cleanup(job);
+            }
+        }
     }
 
     /// <summary>

@@ -83,6 +83,18 @@ public class UrlExtractor
             remaining = remaining.Replace("-ns", "", StringComparison.OrdinalIgnoreCase).Trim();
         }
 
+        // Check for !edit flag (video editing request)
+        var editIndex = remaining.IndexOf("!edit", StringComparison.OrdinalIgnoreCase);
+        if (editIndex >= 0)
+        {
+            job.IsEditRequest = true;
+            var editPrompt = remaining[(editIndex + 5)..].Trim();
+            if (!string.IsNullOrEmpty(editPrompt))
+                job.EditPrompt = editPrompt;
+            // Remove !edit and everything after it from remaining (edit prompt consumes the rest)
+            remaining = remaining[..editIndex].Trim();
+        }
+
         var tokens = remaining.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
         // First token after URL: npub or hex pubkey
