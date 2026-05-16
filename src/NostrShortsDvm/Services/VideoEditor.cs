@@ -48,16 +48,16 @@ public class VideoEditor
             _logger.LogInformation("Sending video to Replicate for editing: {Url}", sourceVideoUrl);
 
             // Step 1: Create a prediction with the public video URL
-            var predictionId = await CreatePredictionAsync(sourceVideoUrl, job.EditPrompt, ct);
+            var (predictionId, createError) = await CreatePredictionAsync(sourceVideoUrl, job.EditPrompt, ct);
             if (predictionId == null)
-                return "Failed to create video edit prediction on Replicate.";
+                return $"Failed to create video edit prediction: {createError ?? "unknown error"}";
 
             _logger.LogInformation("Created Replicate prediction: {Id}", predictionId);
 
             // Step 2: Poll until completion
-            var outputUrl = await PollPredictionAsync(predictionId, ct);
+            var (outputUrl, pollError) = await PollPredictionAsync(predictionId, ct);
             if (outputUrl == null)
-                return "Video edit prediction failed or timed out on Replicate.";
+                return $"Video edit prediction failed: {pollError ?? "timed out"}";
 
             _logger.LogInformation("Prediction completed, output: {Url}", outputUrl);
 
@@ -85,8 +85,9 @@ public class VideoEditor
 
     /// <summary>
     /// Creates a prediction on Replicate for the video edit model.
+    /// Returns (predictionId, null) on success, or (null, errorMessage) on failure.
     /// </summary>
-    private async Task<string?> CreatePredictionAsync(string videoUrl, string editPrompt, CancellationToken ct)
+    private async Task<(string? Id, string? Error)> CreatePredictionAsync(string videoUrl, string editPrompt, CancellationToken ct)
     {
         // Use the model-specific predictions endpoint: /v1/models/{owner}/{name}/predictions
         var model = _settings.VideoEdit.Model; // e.g. "alibaba/happyhorse-1.0"
@@ -114,18 +115,30 @@ public class VideoEditor
         {
             _logger.LogError("Replicate prediction creation failed ({Status}): {Error}",
                 response.StatusCode, responseJson);
-            return null;
+
+            // Extract detail from JSON response for user-friendly error
+            var detail = responseJson;
+            try
+            {
+                using var errDoc = JsonDocument.Parse(responseJson);
+                if (errDoc.RootElement.TryGetProperty("detail", out var detailProp))
+                    detail = detailProp.GetString() ?? responseJson;
+            }
+            catch { /* use raw response */ }
+
+            return (null, detail);
         }
 
         using var doc = JsonDocument.Parse(responseJson);
-        return doc.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
+        var id = doc.RootElement.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+        return (id, null);
     }
 
     /// <summary>
     /// Polls a Replicate prediction until it reaches a terminal state.
-    /// Returns the output URL on success, null on failure/timeout.
+    /// Returns (outputUrl, null) on success, or (null, errorMessage) on failure/timeout.
     /// </summary>
-    private async Task<string?> PollPredictionAsync(string predictionId, CancellationToken ct)
+    private async Task<(string? Url, string? Error)> PollPredictionAsync(string predictionId, CancellationToken ct)
     {
         var url = $"{ReplicateApiBase}/predictions/{predictionId}";
         var timeout = TimeSpan.FromSeconds(_settings.VideoEdit.TimeoutSeconds);
@@ -154,28 +167,28 @@ public class VideoEditor
                     var output = doc.RootElement.GetProperty("output");
                     // Output can be a string URL or an array of URLs
                     if (output.ValueKind == JsonValueKind.String)
-                        return output.GetString();
+                        return (output.GetString(), null);
                     if (output.ValueKind == JsonValueKind.Array && output.GetArrayLength() > 0)
-                        return output[0].GetString();
+                        return (output[0].GetString(), null);
                     _logger.LogError("Prediction succeeded but output format unexpected: {Json}", json);
-                    return null;
+                    return (null, "Prediction succeeded but produced no output");
 
                 case "failed":
                     var error = doc.RootElement.TryGetProperty("error", out var errProp)
                         ? errProp.GetString() : "unknown error";
                     _logger.LogError("Prediction {Id} failed: {Error}", predictionId, error);
-                    return null;
+                    return (null, error);
 
                 case "canceled":
                     _logger.LogWarning("Prediction {Id} was canceled", predictionId);
-                    return null;
+                    return (null, "Prediction was canceled");
 
                 // "starting", "processing" — keep polling
             }
         }
 
         _logger.LogError("Prediction {Id} timed out after {Timeout}s", predictionId, timeout.TotalSeconds);
-        return null;
+        return (null, $"Prediction timed out after {timeout.TotalSeconds}s");
     }
 
     /// <summary>
