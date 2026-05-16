@@ -326,7 +326,8 @@ public class MessageProcessor
     }
 
     /// <summary>
-    /// Processes a video editing request: edit via AI, upload to Blossom, send preview link.
+    /// Processes a video editing request: upload source to Blossom for a public URL,
+    /// send to AI for editing, upload edited result to Blossom, send preview link.
     /// The user can then reply "yes" to publish or provide feedback.
     /// </summary>
     private async Task ProcessEditRequestAsync(
@@ -338,8 +339,21 @@ public class MessageProcessor
                 $"Processing video edit request...\n\nPrompt: \"{job.EditPrompt}\"\n\nThis may take several minutes.",
                 _dvmPrivKey, client, ct);
 
-            // Edit the video via Replicate API
-            var editError = await _videoEditor.EditAsync(job, ct);
+            // Step 1: Upload source video to Blossom to get a public URL for Replicate
+            var sourceUploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
+            if (sourceUploadError != null)
+            {
+                await _publisher.SendDmReplyAsync(senderPubKey,
+                    $"Failed to upload source video to Blossom:\n\nReason: {sourceUploadError}",
+                    _dvmPrivKey, client, ct);
+                return;
+            }
+
+            var sourceBlossomUrl = job.BlossomUrl!;
+            _logger.LogInformation("Source video uploaded to Blossom: {Url}", sourceBlossomUrl);
+
+            // Step 2: Edit the video via Replicate API using the Blossom URL
+            var editError = await _videoEditor.EditAsync(job, sourceBlossomUrl, ct);
             if (editError != null)
             {
                 await _publisher.SendDmReplyAsync(senderPubKey,
@@ -348,16 +362,19 @@ public class MessageProcessor
                 return;
             }
 
-            // Swap the local file path to the edited version for upload
-            var originalPath = job.LocalFilePath;
+            // Step 3: Upload the edited video to Blossom
+            // Reset upload fields so BlossomUploader treats this as a new upload
             job.LocalFilePath = job.EditedFilePath;
+            job.BlossomUrl = null;
+            job.FileHash = null;
+            job.FileSize = null;
+            job.MimeType = "video/mp4";
 
-            // Upload the edited video to Blossom
-            var uploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
-            if (uploadError != null)
+            var editedUploadError = await _uploader.UploadAsync(job, publishPrivKey, ct);
+            if (editedUploadError != null)
             {
                 await _publisher.SendDmReplyAsync(senderPubKey,
-                    $"Failed to upload edited video to Blossom:\n\nReason: {uploadError}",
+                    $"Failed to upload edited video to Blossom:\n\nReason: {editedUploadError}",
                     _dvmPrivKey, client, ct);
                 return;
             }

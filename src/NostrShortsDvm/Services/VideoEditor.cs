@@ -1,7 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using NostrShortsDvm.Config;
 using NostrShortsDvm.Models;
@@ -29,48 +28,43 @@ public class VideoEditor
     }
 
     /// <summary>
-    /// Edits a video using the Replicate API. The source video must already be downloaded (job.LocalFilePath).
-    /// On success, sets job.EditedFilePath to the path of the edited video.
+    /// Edits a video using the Replicate API. Requires a publicly accessible URL for the source video
+    /// (e.g. a Blossom URL). On success, sets job.EditedFilePath to the path of the edited video.
     /// Returns null on success, or an error message on failure.
     /// </summary>
-    public async Task<string?> EditAsync(VideoJob job, CancellationToken ct)
+    public async Task<string?> EditAsync(VideoJob job, string sourceVideoUrl, CancellationToken ct)
     {
         if (!_settings.VideoEdit.Enabled)
             return "Video editing is not configured. Set VideoEdit__ReplicateApiToken.";
 
-        if (string.IsNullOrEmpty(job.LocalFilePath) || !File.Exists(job.LocalFilePath))
-            return "Source video file not found. Download must complete before editing.";
+        if (string.IsNullOrEmpty(sourceVideoUrl))
+            return "Source video URL is required for editing.";
 
         if (string.IsNullOrEmpty(job.EditPrompt))
             return "No edit prompt provided. Use: <url> !edit <description of changes>";
 
         try
         {
-            // Step 1: Upload source video to get a URL that Replicate can access
-            var videoDataUrl = await UploadToReplicateFilesAsync(job.LocalFilePath, ct);
-            if (videoDataUrl == null)
-                return "Failed to upload source video to Replicate for processing.";
+            _logger.LogInformation("Sending video to Replicate for editing: {Url}", sourceVideoUrl);
 
-            _logger.LogInformation("Uploaded source video to Replicate: {Url}", videoDataUrl);
-
-            // Step 2: Create a prediction
-            var predictionId = await CreatePredictionAsync(videoDataUrl, job.EditPrompt, ct);
+            // Step 1: Create a prediction with the public video URL
+            var predictionId = await CreatePredictionAsync(sourceVideoUrl, job.EditPrompt, ct);
             if (predictionId == null)
                 return "Failed to create video edit prediction on Replicate.";
 
             _logger.LogInformation("Created Replicate prediction: {Id}", predictionId);
 
-            // Step 3: Poll until completion
+            // Step 2: Poll until completion
             var outputUrl = await PollPredictionAsync(predictionId, ct);
             if (outputUrl == null)
                 return "Video edit prediction failed or timed out on Replicate.";
 
             _logger.LogInformation("Prediction completed, output: {Url}", outputUrl);
 
-            // Step 4: Download the edited video
+            // Step 3: Download the edited video
             var editedPath = Path.Combine(
                 _settings.YtDlp.TempDir,
-                $"edited_{Path.GetFileName(job.LocalFilePath)}");
+                $"edited_{Path.GetFileNameWithoutExtension(job.LocalFilePath ?? "video")}.mp4");
 
             await DownloadFileAsync(outputUrl, editedPath, ct);
             job.EditedFilePath = editedPath;
@@ -87,43 +81,6 @@ public class VideoEditor
             _logger.LogError(ex, "Video editing failed for {Url}", job.OriginalUrl);
             return $"Video editing failed: {ex.Message}";
         }
-    }
-
-    /// <summary>
-    /// Uploads a file to Replicate's file hosting so models can access it.
-    /// </summary>
-    private async Task<string?> UploadToReplicateFilesAsync(string filePath, CancellationToken ct)
-    {
-        var url = $"{ReplicateApiBase}/files";
-
-        using var fileStream = File.OpenRead(filePath);
-        using var content = new MultipartFormDataContent();
-        var fileContent = new StreamContent(fileStream);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("video/mp4");
-        content.Add(fileContent, "content", Path.GetFileName(filePath));
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.VideoEdit.ReplicateApiToken);
-        request.Content = content;
-
-        var response = await _httpClient.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode)
-        {
-            var error = await response.Content.ReadAsStringAsync(ct);
-            _logger.LogError("Replicate file upload failed ({Status}): {Error}", response.StatusCode, error);
-            return null;
-        }
-
-        var json = await response.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-        if (doc.RootElement.TryGetProperty("urls", out var urls) &&
-            urls.TryGetProperty("get", out var getUrl))
-        {
-            return getUrl.GetString();
-        }
-
-        _logger.LogError("Unexpected Replicate file upload response: {Json}", json);
-        return null;
     }
 
     /// <summary>
