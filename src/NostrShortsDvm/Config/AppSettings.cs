@@ -95,7 +95,7 @@ public class VideoEditSettings
     /// Replicate model version to use for video editing.
     /// Default: alibaba/happyhorse-1.0 (video-edit endpoint).
     /// </summary>
-    public string Model { get; set; } = "alibaba/happyhorse-1.0";
+    public string Model { get; set; } = "luma/modify-video";
 
     /// <summary>
     /// Maximum time to wait for a video edit prediction to complete (seconds).

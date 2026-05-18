@@ -102,6 +102,72 @@ public class OllamaSummarizer
     }
 
     /// <summary>
+    /// Generates a description for an AI-edited video, combining the original video details
+    /// with the edit prompt into a natural, engaging caption.
+    /// Falls back to a simple combined string if Ollama is unavailable.
+    /// </summary>
+    public async Task<string?> GenerateEditedVideoDescriptionAsync(
+        string originalTitle, string originalDescription, string editPrompt, CancellationToken ct = default)
+    {
+        var prompt = $"""
+            You are writing a short caption for a video that was created by AI-editing an original video.
+            Combine the original video's context with the AI edit that was applied.
+            Write a natural, engaging caption (1-2 sentences, under 200 characters).
+            Do NOT mention "AI", "edited", or "modified". Write as if this is the video's own description.
+            Do NOT include hashtags, emojis, or quotation marks.
+            Just return the caption, nothing else.
+
+            Original title: {originalTitle}
+            Original description: {originalDescription}
+            Edit applied: {editPrompt}
+            """;
+
+        try
+        {
+            var requestBody = new
+            {
+                model = _settings.Ollama.Model,
+                prompt = prompt,
+                stream = false
+            };
+
+            var json = JsonSerializer.Serialize(requestBody);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(
+                $"{_settings.Ollama.BaseUrl.TrimEnd('/')}/api/generate", content, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Ollama request failed for edit description ({Status})", response.StatusCode);
+                return $"{originalTitle} — {editPrompt}";
+            }
+
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(responseBody);
+
+            if (doc.RootElement.TryGetProperty("response", out var responseProp))
+            {
+                var caption = responseProp.GetString()?.Trim().Trim('"');
+                if (!string.IsNullOrWhiteSpace(caption))
+                {
+                    _logger.LogInformation("Generated edit description: {Caption}", caption);
+                    return caption;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to generate edit description via Ollama");
+        }
+
+        // Fallback: simple combination
+        return string.IsNullOrWhiteSpace(originalTitle)
+            ? editPrompt
+            : $"{originalTitle} — {editPrompt}";
+    }
+
+    /// <summary>
     /// Pulls the model if not already available.
     /// </summary>
     public async Task EnsureModelAsync(CancellationToken ct = default)

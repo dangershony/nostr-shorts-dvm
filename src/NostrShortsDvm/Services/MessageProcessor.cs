@@ -382,8 +382,13 @@ public class MessageProcessor
                 return;
             }
 
-            // Store as pending — let the user preview before publishing
-            job.Title = $"Edited: {job.EditPrompt}";
+            // Generate a description combining original video info with the edit prompt
+            var originalTitle = job.Title ?? "";
+            var originalDesc = job.Description ?? "";
+            var editedDescription = await _summarizer.GenerateEditedVideoDescriptionAsync(
+                originalTitle, originalDesc, job.EditPrompt ?? "", ct);
+
+            job.Title = editedDescription ?? originalTitle;
             job.Description = null;
             _pendingJobs.SetPending(senderPubKey, job, job.Title);
 

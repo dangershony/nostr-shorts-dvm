@@ -215,7 +215,6 @@ public class EventPublisher
 
         evt.Tags ??= [];
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.BlossomUrl!] });
-        evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.OriginalUrl!] });
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
 
         // Attribution: origin tag
@@ -250,7 +249,6 @@ public class EventPublisher
         if (job.FileSize.HasValue)
             evt.Tags.Add(new NostrEventTag { TagIdentifier = "size", Data = [job.FileSize.Value.ToString()] });
         evt.Tags.Add(new NostrEventTag { TagIdentifier = "t", Data = ["shorts"] });
-        evt.Tags.Add(new NostrEventTag { TagIdentifier = "r", Data = [job.OriginalUrl!] });
 
         // d-tag for addressable event
         evt.SetTag("d", job.FileHash ?? Guid.NewGuid().ToString());

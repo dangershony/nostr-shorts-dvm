@@ -90,15 +90,16 @@ public class VideoEditor
     private async Task<(string? Id, string? Error)> CreatePredictionAsync(string videoUrl, string editPrompt, CancellationToken ct)
     {
         // Use the model-specific predictions endpoint: /v1/models/{owner}/{name}/predictions
-        var model = _settings.VideoEdit.Model; // e.g. "alibaba/happyhorse-1.0"
+        var model = _settings.VideoEdit.Model; // e.g. "luma/modify-video"
         var url = $"{ReplicateApiBase}/models/{model}/predictions";
 
         var payload = new
         {
             input = new Dictionary<string, object>
             {
-                ["video"] = videoUrl,
-                ["prompt"] = editPrompt
+                ["video_url"] = videoUrl,
+                ["prompt"] = editPrompt,
+                ["mode"] = "flex_1"
             }
         };
 
